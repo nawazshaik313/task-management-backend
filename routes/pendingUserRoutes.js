@@ -16,8 +16,13 @@ router.post('/', async (req, res) => {
   const hashedPassword = await bcrypt.hash(password, 10);
   const newUser = new PendingUser({ displayName, email, password: hashedPassword, role, uniqueId });
 
-  const savedUser = await newUser.save();
-  res.status(201).json(savedUser);
+  try {
+    const savedUser = await newUser.save();
+    res.status(201).json(savedUser);
+} catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to save user' });
+}
 });
 
 module.exports = router;
