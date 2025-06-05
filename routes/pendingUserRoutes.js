@@ -1,21 +1,23 @@
-
-const express = require("express");
+const express = require('express');
+const bcrypt = require('bcryptjs');
 const router = express.Router();
-const PendingUser = require("../models/PendingUser");
+const PendingUser = require('../models/PendingUser');
 
-router.get("/", async (req, res) => {
-  const pendingUsers = await PendingUser.find();
-  res.json(pendingUsers);
-});
+router.post('/', async (req, res) => {
+  const { displayName, email, password, role, uniqueId } = req.body;
 
-router.post("/", async (req, res) => {
-  try {
-    const newPendingUser = new PendingUser(req.body);
-    await newPendingUser.save();
-    res.status(201).json(newPendingUser); // Send back created user
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+  if (!displayName || !email || !password || !role || !uniqueId) {
+    return res.status(400).json({ error: 'Missing required fields' });
   }
+
+  const existing = await PendingUser.findOne({ $or: [{ email }, { uniqueId }] });
+  if (existing) return res.status(409).json({ error: 'User already exists' });
+
+  const hashedPassword = await bcrypt.hash(password, 10);
+  const newUser = new PendingUser({ displayName, email, password: hashedPassword, role, uniqueId });
+
+  const savedUser = await newUser.save();
+  res.status(201).json(savedUser);
 });
 
 module.exports = router;
