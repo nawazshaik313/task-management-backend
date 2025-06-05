@@ -10,9 +10,9 @@ router.get("/", async (req, res) => {
 
 router.post("/", async (req, res) => {
   try {
-    await PendingUser.deleteMany({});
-    await PendingUser.insertMany(req.body);
-    res.json({ message: "Pending users saved successfully" });
+    const newPendingUser = new PendingUser(req.body);
+    await newPendingUser.save();
+    res.status(201).json(newPendingUser); // Send back created user
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
