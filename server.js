@@ -54,7 +54,9 @@ const newPendingUser = new PendingUser({
 });
 
 await newPendingUser.save();
-res.status(201).json(newPendingUser);
+res.status(201).json({ success: true, user: newPendingUser });
+
+
 } catch (err) {
 console.error("❌ Error saving pending user:", err);
 res.status(500).json({ error: "Server error while registering." });
@@ -70,3 +72,6 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
 });
+res.status(400).json({ success: false, error: 'Missing required fields' });
+res.status(409).json({ success: false, error: 'Email already exists' });
+
