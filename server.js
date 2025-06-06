@@ -26,52 +26,40 @@ const PendingUser = mongoose.model("PendingUser", pendingUserSchema);
 
 // Route: Register Pending User
 app.post('/pending-users', async (req, res) => {
-const { displayName, email, password, role, uniqueId } = req.body;
+  const { displayName, email, password, role, uniqueId } = req.body;
 
-// Validate required fields
-if (!displayName || !email || !password || !role || !uniqueId) {
-  return res.status(400).json({
-    success: false,
-    error: 'Missing required fields'
-  });
-}
+  if (!displayName || !email || !password || !role || !uniqueId) {
+    return res.status(400).json({ success: false, error: 'Missing required fields' });
+  }
 
-try {
-// Check if email or uniqueId already exists
-const existing = await PendingUser.findOne({ $or: [{ email }, { uniqueId }] });
-if (existing) {
-  return res.status(409).json({
-    success: false,
-    error: 'Email or Unique ID already exists'
-  });
-}
+  try {
+    const existing = await PendingUser.findOne({ $or: [{ email }, { uniqueId }] });
+    if (existing) {
+      return res.status(409).json({ success: false, error: 'Email or Unique ID already exists' });
+    }
 
+    const hashedPassword = await bcrypt.hash(password, 10);
 
-// Hash password
-const hashedPassword = await bcrypt.hash(password, 10);
+    const newPendingUser = new PendingUser({
+      displayName,
+      email,
+      password: hashedPassword,
+      role,
+      uniqueId,
+    });
 
-// Create and save
-const newPendingUser = new PendingUser({
-  displayName,
-  email,
-  password: hashedPassword,
-  role,
-  uniqueId,
-});
+    await newPendingUser.save();
 
-await newPendingUser.save();
-res.status(201).json({
-  success: true,
-  message: "Registration successful",
-  user: newPendingUser
-});
+    res.status(201).json({
+      success: true,
+      message: "Registration successful",
+      user: newPendingUser
+    });
 
-
-
-} catch (err) {
-console.error("❌ Error saving pending user:", err);
-res.status(500).json({ error: "Server error while registering." });
-}
+  } catch (err) {
+    console.error("❌ Error saving pending user:", err);
+    res.status(500).json({ success: false, error: "Server error while registering." });
+  }
 });
 
 // Test route
