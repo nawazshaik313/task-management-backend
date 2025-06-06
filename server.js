@@ -72,6 +72,4 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
 });
-res.status(400).json({ success: false, error: 'Missing required fields' });
-res.status(409).json({ success: false, error: 'Email already exists' });
 
