@@ -30,14 +30,20 @@ const { displayName, email, password, role, uniqueId } = req.body;
 
 // Validate required fields
 if (!displayName || !email || !password || !role || !uniqueId) {
-return res.status(400).json({ error: 'Missing required fields' });
+  return res.status(400).json({
+    success: false,
+    error: 'Missing required fields'
+  });
 }
 
 try {
 // Check if email or uniqueId already exists
 const existing = await PendingUser.findOne({ $or: [{ email }, { uniqueId }] });
 if (existing) {
-return res.status(409).json({ error: 'Email or Unique ID already exists' });
+  return res.status(409).json({
+    success: false,
+    error: 'Email or Unique ID already exists'
+  });
 }
 
 
@@ -54,7 +60,12 @@ const newPendingUser = new PendingUser({
 });
 
 await newPendingUser.save();
-res.status(201).json({ success: true, user: newPendingUser });
+res.status(201).json({
+  success: true,
+  message: "Registration successful",
+  user: newPendingUser
+});
+
 
 
 } catch (err) {
