@@ -81,9 +81,10 @@ app.post('/pending-users', async (req, res) => {
     });
 
   } catch (err) {
-    console.error("❌ Error saving user:", err);
-    res.status(500).json({ success: false, error: "Server error while registering." });
-  }
+  console.error("❌ Error saving user:", err.message || err);
+  res.status(500).json({ success: false, error: err.message || "Server error while registering." });
+}
+
 });
 
 
