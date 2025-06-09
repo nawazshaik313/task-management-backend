@@ -108,7 +108,7 @@ app.post('/users/login', async (req, res) => {
   const { email, password } = req.body;
 
   try {
-    const user = await User.findOne({ email });
+    const user = await User.findOne({ email: new RegExp(`^${email}$`, 'i') });
 
     if (!user) {
       return res.status(401).json({ success: false, message: 'Invalid email or user does not exist' });
