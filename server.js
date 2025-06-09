@@ -4,7 +4,7 @@ const bcrypt = require('bcryptjs');
 const cors = require('cors');
 require('dotenv').config();
 
-const PendingUser = require('./models/PendingUser');
+
 const User = require('./models/User'); // ✅ Add this line
 
 const app = express();
