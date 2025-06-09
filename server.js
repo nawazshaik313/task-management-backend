@@ -1,8 +1,11 @@
-const express = require("express");
-const mongoose = require("mongoose");
-const cors = require("cors");
-const bcrypt = require("bcryptjs");
-require("dotenv").config();
+const express = require('express');
+const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
+const cors = require('cors');
+require('dotenv').config();
+
+const PendingUser = require('./models/PendingUser');
+const User = require('./models/User'); // ✅ Add this line
 
 const app = express();
 app.use(cors());
