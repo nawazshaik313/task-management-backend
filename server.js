@@ -1,8 +1,9 @@
 
+require('dotenv').config(); // MUST BE AT THE VERY TOP
+
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
-require('dotenv').config();
 
 // Import Routers
 const userRoutes = require('./routes/userRoutes');
@@ -22,6 +23,12 @@ app.use(cors()); // Configure CORS appropriately for your production environment
 app.use(express.json()); // To parse JSON request bodies
 
 // Connect to MongoDB
+// Check if MONGO_URI is set
+if (!process.env.MONGO_URI) {
+  console.error("FATAL ERROR: MONGO_URI environment variable is not defined.");
+  process.exit(1); // Exit if DB connection string is missing
+}
+
 mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log("✅ MongoDB connected successfully."))
   .catch(err => {
