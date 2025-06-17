@@ -77,6 +77,7 @@ router.post('/register', async (req, res) => {
     }
     
     if (!organizationIdToSet) { 
+        console.error("FATAL LOGIC ERROR: organizationIdToSet is undefined at critical point in /users/register. Request body:", req.body);
         return res.status(400).json({ success: false, message: 'Organization ID could not be determined for the user.' });
     }
 
@@ -106,7 +107,18 @@ router.post('/register', async (req, res) => {
     res.status(201).json({ success: true, message: 'User registered successfully.', user: newUser.toJSON() });
 
   } catch (error) {
-    console.error("User registration error object:", error); // Log the full error object
+    console.error("--- USER REGISTRATION ERROR ---");
+    console.error("Type:", error.name);
+    console.error("Message:", error.message);
+    console.error("Code:", error.code);
+    console.error("Stack Trace:", error.stack);
+    try {
+        console.error("Full Error Object (JSON):", JSON.stringify(error, Object.getOwnPropertyNames(error)));
+    } catch (e) {
+        console.error("Full Error Object (could not stringify):", error);
+    }
+    console.error("--- END USER REGISTRATION ERROR ---");
+
     if (error.code === 11000) { 
         return res.status(400).json({ success: false, message: 'Email or Unique ID already exists (unique constraint violation).' });
     } else if (error.name === 'ValidationError') {
@@ -116,7 +128,21 @@ router.post('/register', async (req, res) => {
         }
         return res.status(400).json({ success: false, message: 'Validation failed. Please check the provided data.', errors });
     }
-    res.status(500).json({ success: false, message: 'Server error during registration.', errorDetails: error.message });
+    
+    let detailedErrorMessage = `Server error during registration.`;
+    if (error.name) detailedErrorMessage += ` (Type: ${error.name})`;
+    // Avoid duplicating message if name and message are the same
+    if (error.message && error.name !== error.message && !detailedErrorMessage.includes(error.message)) {
+        detailedErrorMessage += ` Details: ${error.message}`;
+    }
+
+
+    res.status(500).json({ 
+        success: false, 
+        message: detailedErrorMessage,
+        errorType: error.name, 
+        errorCode: error.code,
+    });
   }
 });
 
