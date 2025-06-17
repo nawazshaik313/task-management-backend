@@ -106,11 +106,17 @@ router.post('/register', async (req, res) => {
     res.status(201).json({ success: true, message: 'User registered successfully.', user: newUser.toJSON() });
 
   } catch (error) {
-    console.error("User registration error:", error);
+    console.error("User registration error object:", error); // Log the full error object
     if (error.code === 11000) { 
         return res.status(400).json({ success: false, message: 'Email or Unique ID already exists (unique constraint violation).' });
+    } else if (error.name === 'ValidationError') {
+        let errors = {};
+        for (let field in error.errors) {
+            errors[field] = error.errors[field].message;
+        }
+        return res.status(400).json({ success: false, message: 'Validation failed. Please check the provided data.', errors });
     }
-    res.status(500).json({ success: false, message: 'Server error during registration.', error: error.message });
+    res.status(500).json({ success: false, message: 'Server error during registration.', errorDetails: error.message });
   }
 });
 
