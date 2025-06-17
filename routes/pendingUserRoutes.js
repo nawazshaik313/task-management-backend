@@ -7,60 +7,70 @@ const { verifyToken, isAdmin } = require('../middleware/auth');
 
 // Create a new pending user registration
 router.post('/', async (req, res) => {
-  let { displayName, email, password, role, uniqueId, referringAdminId, organizationIdFromReferrer } = req.body;
+  let { displayName, email, password, role, uniqueId, referringAdminId } = req.body;
 
-  if (!displayName || !email || !password || !role || !uniqueId) {
-    return res.status(400).json({ success: false, error: 'Missing required fields for pending user.' });
+  if (!displayName || !email || !password || !uniqueId) { // Role not strictly required here, will default to user for pre-reg
+    return res.status(400).json({ success: false, error: 'Missing required fields for pending user (displayName, email, password, uniqueId).' });
   }
 
+  // Pre-registrations should always be for 'user' role.
+  const finalRole = 'user';
+
+  let finalOrganizationId;
+
+  if (referringAdminId) {
+    try {
+      const referrer = await User.findById(referringAdminId);
+      if (referrer && referrer.organizationId && referrer.role === 'admin') {
+          finalOrganizationId = referrer.organizationId;
+      } else {
+           return res.status(400).json({ success: false, error: 'Referring admin invalid, not an admin, or has no organization.' });
+      }
+    } catch (findAdminErr) {
+        console.error("Error finding referring admin:", findAdminErr);
+        return res.status(500).json({ success: false, error: 'Server error validating referring admin.' });
+    }
+  } else {
+    // This case should ideally not be hit for a pre-registration flow which implies a referring admin.
+    // If it's a general registration flow that creates pending users, it needs its own org context logic.
+    return res.status(400).json({ success: false, error: 'Pre-registration requires a referring admin.' });
+  }
+
+
   try {
-    // Check against active users in the target organization if organizationIdFromReferrer is provided
-    // Or globally if not (though this might need refinement for strict multi-tenancy)
-    let query = { $or: [{ email: email.toLowerCase() }, { uniqueId }] };
-    if (organizationIdFromReferrer) {
-        query = { $or: [{ email: email.toLowerCase(), organizationId: organizationIdFromReferrer }, { uniqueId, organizationId: organizationIdFromReferrer }] };
+    // Check against active users and pending users in the target organization
+    const existingUserInOrg = await User.findOne({ 
+        $or: [{ email: email.toLowerCase() }, { uniqueId }],
+        organizationId: finalOrganizationId 
+    });
+    if (existingUserInOrg) {
+      return res.status(409).json({ success: false, error: 'Email or Unique ID already registered as an active user in this organization.' });
     }
     
-    const existingUser = await User.findOne(query);
-    if (existingUser) {
-      return res.status(409).json({ success: false, error: 'Email or Unique ID already registered as an active user in this context.' });
+    const existingPendingInOrg = await PendingUser.findOne({ 
+        $or: [{ email: email.toLowerCase() }, { uniqueId }],
+        organizationId: finalOrganizationId
+     });
+    if (existingPendingInOrg) {
+      return res.status(409).json({ success: false, error: 'Email or Unique ID already pending approval in this organization.' });
     }
     
-    const existingPendingUser = await PendingUser.findOne(query); // Check pending users also with org context
-    if (existingPendingUser) {
-      return res.status(409).json({ success: false, error: 'Email or Unique ID already pending approval in this context.' });
-    }
-    
-    let finalOrganizationId = organizationIdFromReferrer;
-    if (referringAdminId && !organizationIdFromReferrer) {
-        const referrer = await User.findById(referringAdminId);
-        if (referrer && referrer.organizationId) {
-            finalOrganizationId = referrer.organizationId;
-        } else {
-             return res.status(400).json({ success: false, error: 'Referring admin invalid or has no organization.' });
-        }
-    }
-    if(!finalOrganizationId && role !== 'admin') { // Non-admin pending users must have an org context
-        return res.status(400).json({ success: false, error: 'Organization context required for pending user.' });
-    }
-
-
     const newPendingUser = new PendingUser({
       displayName,
       email,
       password, 
-      role,
+      role: finalRole, // Force to 'user'
       uniqueId,
       referringAdminId: referringAdminId || null,
-      organizationId: finalOrganizationId // Set organizationId for the pending user
+      organizationId: finalOrganizationId 
     });
 
     const savedPendingUser = await newPendingUser.save();
     res.status(201).json({ success: true, user: savedPendingUser.toJSON() });
   } catch (err) {
     console.error("Error creating pending user:", err);
-    if (err.code === 11000) { // Mongoose duplicate key error
-        return res.status(409).json({ success: false, error: 'Duplicate email or uniqueId for pending user (within org if specified).' });
+    if (err.code === 11000) { 
+        return res.status(409).json({ success: false, error: 'Duplicate email or uniqueId for pending user (within organization).' });
     }
     res.status(500).json({ success: false, error: 'Failed to save pending user: ' + err.message });
   }
@@ -112,7 +122,6 @@ router.post('/approve/:id', [verifyToken, isAdmin], async (req, res) => {
       return res.status(404).json({ success: false, error: 'Pending user not found in your organization.' });
     }
 
-    // Double check active users in this specific organization
     const existingUser = await User.findOne({ 
         $or: [{ email: pendingUser.email }, { uniqueId: pendingUser.uniqueId }],
         organizationId: req.user.organizationId 
@@ -122,23 +131,22 @@ router.post('/approve/:id', [verifyToken, isAdmin], async (req, res) => {
       return res.status(409).json({ success: false, error: 'User with this email or unique ID already exists in this organization. Pending entry removed.' });
     }
     
-    // Check referral constraint if applicable (within the same organization)
     if (pendingUser.referringAdminId && pendingUser.referringAdminId.toString() !== req.user.id) {
         const referrer = await User.findById(pendingUser.referringAdminId);
         if (!referrer || referrer.organizationId.toString() !== req.user.organizationId) {
              return res.status(403).json({ success: false, message: "Forbidden: Referral mismatch or referrer not in your organization." });
         }
-        // If referrer is valid and in same org, current admin can still approve.
     }
     
-    let finalApprovedRole = pendingUser.role; // Default to pending user's intended role
-    if (req.user.role === 'admin' && requestedApprovedRole) { // If admin explicitly sets a role during approval
+    let finalApprovedRole = pendingUser.role; 
+    if (req.user.role === 'admin' && requestedApprovedRole) {
         if (requestedApprovedRole === 'admin') {
-            // Allow approving as admin within their own organization.
             finalApprovedRole = 'admin';
         } else {
             finalApprovedRole = 'user';
         }
+    } else { // Ensure it defaults to 'user' if not explicitly set by admin or from pending record
+        finalApprovedRole = 'user';
     }
     
     const newUser = new User({
@@ -152,7 +160,7 @@ router.post('/approve/:id', [verifyToken, isAdmin], async (req, res) => {
       phone: phone || '',
       notificationPreference: notificationPreference || 'email',
       referringAdminId: pendingUser.referringAdminId || req.user.id,
-      organizationId: req.user.organizationId // User becomes part of the approving admin's organization
+      organizationId: req.user.organizationId 
     });
     
     const createdUser = await newUser.save(); 
