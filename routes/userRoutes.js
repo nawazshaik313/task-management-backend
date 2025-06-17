@@ -10,7 +10,7 @@ const emailService = require('../utils/emailService');
 
 // User Registration
 router.post('/register', async (req, res) => {
-  const { email, uniqueId, password, displayName, role, position, userInterests, phone, notificationPreference, referringAdminId, organizationName } = req.body;
+  const { email, uniqueId, password, displayName, role, position, userInterests, phone, notificationPreference, referringAdminId, companyName } = req.body; // Changed organizationName to companyName
 
   if (!email || !uniqueId || !password || !displayName) {
     return res.status(400).json({ success: false, message: 'Email, Unique ID, Password, and Display Name are required.' });
@@ -19,26 +19,21 @@ router.post('/register', async (req, res) => {
   try {
     let finalRole = role || 'user';
     let organizationIdToSet;
-    let newAdminSiteName = ''; // For email
+    let newAdminCompanyName = ''; // For email, changed from newAdminSiteName
 
     if (finalRole === 'admin') {
-      if (!organizationName) {
-        return res.status(400).json({ success: false, message: 'Organization Name is required for admin registration.' });
+      if (!companyName) { // Changed organizationName to companyName
+        return res.status(400).json({ success: false, message: 'Company Name is required for admin registration.' });
       }
-      const existingAdminForOrgName = await User.findOne({ role: 'admin', organizationId: organizationName.toLowerCase().replace(/\s+/g, '-') });
-      if (existingAdminForOrgName) {
-         // This check is a bit simplistic, a true org name check would be better.
-         // For now, let's assume org name is a proxy for org ID uniqueness for first admin.
-      }
+      // The organizationId is now a unique ObjectId string, not derived from companyName directly for uniqueness.
       organizationIdToSet = new mongoose.Types.ObjectId().toString(); // Generate unique Org ID
-      newAdminSiteName = organizationName;
+      newAdminCompanyName = companyName; // Use companyName for email
 
       // Ensure no user (admin or otherwise) already exists with this email or uniqueId system-wide if it's a new admin
-      // This is a global check for admins because they create new orgs.
-       let existingUserGlobal = await User.findOne({ $or: [{ email: email.toLowerCase() }, { uniqueId }] });
-       if (existingUserGlobal) {
-         return res.status(400).json({ success: false, message: 'User with this email or unique ID already exists globally. Cannot register new admin.' });
-       }
+      let existingUserGlobal = await User.findOne({ $or: [{ email: email.toLowerCase() }, { uniqueId }] });
+      if (existingUserGlobal) {
+        return res.status(400).json({ success: false, message: 'User with this email or unique ID already exists globally. Cannot register new admin.' });
+      }
 
     } else { // Role is 'user'
       if (req.body.organizationId) { // Admin creating user directly
@@ -46,8 +41,6 @@ router.post('/register', async (req, res) => {
           const orgAdmin = await User.findOne({_id: referringAdminId, organizationId: organizationIdToSet, role: 'admin'});
           if (!orgAdmin) return res.status(400).json({success: false, message: "Referring admin does not belong to the specified organization or is not an admin."});
       } else if (referringAdminId) { // User pre-registration via link
-          // This path is usually handled by /pending-users route for pre-reg.
-          // If direct registration to User model for users happens, it must have referringAdminId.
           const refAdmin = await User.findById(referringAdminId);
           if (!refAdmin || !refAdmin.organizationId) {
               return res.status(400).json({ success: false, message: 'Referring admin not found or has no organization.' });
@@ -66,18 +59,13 @@ router.post('/register', async (req, res) => {
 
          const newPendingPublicUser = new PendingUser({
             displayName, email, password, role: 'user', uniqueId,
-            // No organizationId or referringAdminId yet, needs assignment by a super-admin or specific org admin.
-            // This requires a separate flow for assigning org to these pending users.
-            // For now, we'll mark it as needing system admin attention.
             organizationId: "NEEDS_ASSIGNMENT_BY_SYSTEM_ADMIN"
          });
          await newPendingPublicUser.save();
          
-         // Notify user their registration is pending
          emailService.sendRegistrationPendingToUserEmail(email, displayName)
             .catch(err => console.error("EmailJS Error (sendRegistrationPendingToUserEmail):", err));
 
-         // Notify a system admin (if configured)
          if (process.env.SYSTEM_ADMIN_EMAIL) {
              emailService.sendNewPendingRegistrationToAdminEmail(process.env.SYSTEM_ADMIN_EMAIL, "System Admin", displayName, email, "NEEDS_ASSIGNMENT_BY_SYSTEM_ADMIN")
                 .catch(err => console.error("EmailJS Error (sendNewPendingRegistrationToAdminEmail to system admin):", err));
@@ -87,21 +75,18 @@ router.post('/register', async (req, res) => {
       }
     }
     
-    if (!organizationIdToSet) { // Should not happen if logic above is correct
+    if (!organizationIdToSet) { 
         return res.status(400).json({ success: false, message: 'Organization ID could not be determined for the user.' });
     }
 
-    // Check for existing user within the determined organization
     const existingUserInOrg = await User.findOne({ $or: [{ email: email.toLowerCase() }, { uniqueId }], organizationId: organizationIdToSet });
     if (existingUserInOrg) {
       return res.status(400).json({ success: false, message: 'User with this email or unique ID already exists in this organization.' });
     }
-    // Also check pending users for that organization
      const existingPendingInOrg = await PendingUser.findOne({ $or: [{ email: email.toLowerCase() }, { uniqueId }], organizationId: organizationIdToSet });
      if (existingPendingInOrg) {
         return res.status(400).json({ success: false, message: 'An account with this email or unique ID is already pending approval for this organization.' });
      }
-
 
     const newUser = new User({
       email, uniqueId, password, displayName,
@@ -114,14 +99,14 @@ router.post('/register', async (req, res) => {
 
     await newUser.save();
 
-    emailService.sendWelcomeRegistrationEmail(newUser.email, newUser.displayName, newUser.role, newAdminSiteName)
+    emailService.sendWelcomeRegistrationEmail(newUser.email, newUser.displayName, newUser.role, newAdminCompanyName) // Pass companyName
       .catch(err => console.error("EmailJS Error (sendWelcomeRegistrationEmail):", err));
       
     res.status(201).json({ success: true, message: 'User registered successfully.', user: newUser.toJSON() });
 
   } catch (error) {
     console.error("User registration error:", error);
-    if (error.code === 11000) { // Mongoose duplicate key error
+    if (error.code === 11000) { 
         return res.status(400).json({ success: false, message: 'Email or Unique ID already exists (unique constraint violation).' });
     }
     res.status(500).json({ success: false, message: 'Server error during registration.', error: error.message });
@@ -355,9 +340,6 @@ router.post('/forgot-password', async (req, res) => {
             { expiresIn: '15m' }
         ); 
         
-        // Construct reset link. Actual reset page path on frontend needs to be defined.
-        // Example: /reset-password?token=<token>
-        // Frontend should have a page that handles this hash: `#PasswordReset?token=XYZ`
         const resetLink = `${process.env.FRONTEND_URL}#PasswordReset?token=${resetToken}`;
         
         emailService.sendPasswordResetEmail(user.email, user.displayName, resetLink)
@@ -370,8 +352,6 @@ router.post('/forgot-password', async (req, res) => {
     }
 });
 
-// The actual password reset will be a new page/component on the frontend.
-// That page will take the token from URL, new password, and call this endpoint.
 router.post('/reset-password', async (req, res) => {
     const { token, newPassword } = req.body;
     if (!token || !newPassword) {
