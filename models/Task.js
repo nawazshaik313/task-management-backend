@@ -8,6 +8,7 @@ const taskSchema = new mongoose.Schema({
   programId: { type: mongoose.Schema.Types.ObjectId, ref: 'Program', default: null },
   programName: { type: String, trim: true }, // Denormalized for convenience
   deadline: { type: Date },
+  organizationId: { type: String, required: true, trim: true }, // Added for multi-tenancy
   createdAt: { type: Date, default: Date.now }
 });
 

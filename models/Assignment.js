@@ -20,11 +20,12 @@ const assignmentSchema = new mongoose.Schema({
   deadline: { type: Date }, // Specific deadline for this assignment instance
   userSubmissionDate: { type: Date },
   userDelayReason: { type: String, trim: true },
+  organizationId: { type: String, required: true, trim: true },
   createdAt: { type: Date, default: Date.now }
 });
 
-// Compound index to prevent duplicate assignments of the same task to the same person
-assignmentSchema.index({ taskId: 1, personId: 1 }, { unique: true });
+// Compound index to prevent duplicate assignments of the same task to the same person within an organization
+assignmentSchema.index({ taskId: 1, personId: 1, organizationId: 1 }, { unique: true });
 
 assignmentSchema.set('toJSON', {
   virtuals: true,

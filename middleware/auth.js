@@ -9,11 +9,18 @@ function verifyToken(req, res, next) {
     return res.status(401).json({ success: false, message: 'Access token missing' });
   }
 
-  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+  jwt.verify(token, process.env.JWT_SECRET, (err, decodedUserPayload) => {
     if (err) {
       return res.status(403).json({ success: false, message: 'Invalid or expired token' });
     }
-    req.user = user; // Add decoded user payload to request object
+    // decodedUserPayload should include id, email, role, displayName, uniqueId, organizationId
+    req.user = decodedUserPayload; 
+    if (!req.user.organizationId) {
+        // This case should ideally not happen if login/registration correctly include organizationId in token.
+        // As a fallback, one might try to fetch it, but it's better to ensure token integrity.
+        console.warn(`WARN: organizationId missing from token for user ${req.user.id}. Data scoping might be incomplete.`);
+        // return res.status(403).json({ success: false, message: 'Token is missing organization information.' });
+    }
     next();
   });
 }

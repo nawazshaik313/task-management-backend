@@ -7,49 +7,72 @@ const { verifyToken, isAdmin } = require('../middleware/auth');
 
 // Create a new pending user registration
 router.post('/', async (req, res) => {
-  let { displayName, email, password, role, uniqueId, referringAdminId } = req.body;
+  let { displayName, email, password, role, uniqueId, referringAdminId, organizationIdFromReferrer } = req.body;
 
   if (!displayName || !email || !password || !role || !uniqueId) {
     return res.status(400).json({ success: false, error: 'Missing required fields for pending user.' });
   }
 
   try {
-    const existingUser = await User.findOne({ $or: [{ email: email.toLowerCase() }, { uniqueId }] });
+    // Check against active users in the target organization if organizationIdFromReferrer is provided
+    // Or globally if not (though this might need refinement for strict multi-tenancy)
+    let query = { $or: [{ email: email.toLowerCase() }, { uniqueId }] };
+    if (organizationIdFromReferrer) {
+        query = { $or: [{ email: email.toLowerCase(), organizationId: organizationIdFromReferrer }, { uniqueId, organizationId: organizationIdFromReferrer }] };
+    }
+    
+    const existingUser = await User.findOne(query);
     if (existingUser) {
-      return res.status(409).json({ success: false, error: 'Email or Unique ID already registered as an active user.' });
+      return res.status(409).json({ success: false, error: 'Email or Unique ID already registered as an active user in this context.' });
     }
-    const existingPendingUser = await PendingUser.findOne({ $or: [{ email: email.toLowerCase() }, { uniqueId }] });
+    
+    const existingPendingUser = await PendingUser.findOne(query); // Check pending users also with org context
     if (existingPendingUser) {
-      return res.status(409).json({ success: false, error: 'Email or Unique ID already pending approval.' });
+      return res.status(409).json({ success: false, error: 'Email or Unique ID already pending approval in this context.' });
     }
     
-    // Allow 'admin' role for pending user directly. Approval logic will handle final creation.
-    // The role from req.body will be used directly for the PendingUser document.
-    
+    let finalOrganizationId = organizationIdFromReferrer;
+    if (referringAdminId && !organizationIdFromReferrer) {
+        const referrer = await User.findById(referringAdminId);
+        if (referrer && referrer.organizationId) {
+            finalOrganizationId = referrer.organizationId;
+        } else {
+             return res.status(400).json({ success: false, error: 'Referring admin invalid or has no organization.' });
+        }
+    }
+    if(!finalOrganizationId && role !== 'admin') { // Non-admin pending users must have an org context
+        return res.status(400).json({ success: false, error: 'Organization context required for pending user.' });
+    }
+
+
     const newPendingUser = new PendingUser({
       displayName,
       email,
       password, 
-      role, // Use role from request; no downgrade here
+      role,
       uniqueId,
-      referringAdminId: referringAdminId || null
+      referringAdminId: referringAdminId || null,
+      organizationId: finalOrganizationId // Set organizationId for the pending user
     });
 
     const savedPendingUser = await newPendingUser.save();
     res.status(201).json({ success: true, user: savedPendingUser.toJSON() });
   } catch (err) {
     console.error("Error creating pending user:", err);
-    if (err.code === 11000) {
-        return res.status(409).json({ success: false, error: 'Duplicate email or uniqueId for pending user.' });
+    if (err.code === 11000) { // Mongoose duplicate key error
+        return res.status(409).json({ success: false, error: 'Duplicate email or uniqueId for pending user (within org if specified).' });
     }
     res.status(500).json({ success: false, error: 'Failed to save pending user: ' + err.message });
   }
 });
 
-// Get all pending users (Admin only)
+// Get all pending users (Admin only, scoped to their organization)
 router.get('/', [verifyToken, isAdmin], async (req, res) => {
   try {
-    const pendingUsers = await PendingUser.find().sort({ submissionDate: -1 });
+    if (!req.user.organizationId) {
+        return res.status(403).json({ success: false, error: 'Admin organization context missing.' });
+    }
+    const pendingUsers = await PendingUser.find({ organizationId: req.user.organizationId }).sort({ submissionDate: -1 });
     res.json(pendingUsers.map(pu => pu.toJSON()));
   } catch (err) {
     console.error("Error fetching pending users:", err);
@@ -57,12 +80,15 @@ router.get('/', [verifyToken, isAdmin], async (req, res) => {
   }
 });
 
-// Delete a pending user (Admin only - for rejection)
+// Delete a pending user (Admin only - for rejection, scoped to organization)
 router.delete('/:id', [verifyToken, isAdmin], async (req, res) => {
   try {
-    const pendingUser = await PendingUser.findByIdAndDelete(req.params.id);
+    if (!req.user.organizationId) {
+        return res.status(403).json({ success: false, error: 'Admin organization context missing.' });
+    }
+    const pendingUser = await PendingUser.findOneAndDelete({ _id: req.params.id, organizationId: req.user.organizationId });
     if (!pendingUser) {
-      return res.status(404).json({ success: false, error: 'Pending user not found.' });
+      return res.status(404).json({ success: false, error: 'Pending user not found in your organization.' });
     }
     res.json({ success: true, message: 'Pending user rejected and removed successfully.' });
   } catch (err) {
@@ -71,40 +97,48 @@ router.delete('/:id', [verifyToken, isAdmin], async (req, res) => {
   }
 });
 
-// Approve a pending user (Admin only)
+// Approve a pending user (Admin only, scoped to organization)
 router.post('/approve/:id', [verifyToken, isAdmin], async (req, res) => {
   const pendingUserId = req.params.id;
   const { position, userInterests, phone, notificationPreference, role: requestedApprovedRole } = req.body;
 
+  if (!req.user.organizationId) {
+    return res.status(403).json({ success: false, error: 'Admin organization context missing.' });
+  }
+
   try {
-    const pendingUser = await PendingUser.findById(pendingUserId);
+    const pendingUser = await PendingUser.findOne({ _id: pendingUserId, organizationId: req.user.organizationId });
     if (!pendingUser) {
-      return res.status(404).json({ success: false, error: 'Pending user not found.' });
+      return res.status(404).json({ success: false, error: 'Pending user not found in your organization.' });
     }
 
-    const existingUser = await User.findOne({ $or: [{ email: pendingUser.email }, { uniqueId: pendingUser.uniqueId }] });
+    // Double check active users in this specific organization
+    const existingUser = await User.findOne({ 
+        $or: [{ email: pendingUser.email }, { uniqueId: pendingUser.uniqueId }],
+        organizationId: req.user.organizationId 
+    });
     if (existingUser) {
-      await PendingUser.findByIdAndDelete(pendingUserId);
-      return res.status(409).json({ success: false, error: 'User with this email or unique ID already exists. Pending entry removed.' });
-    }
-
-    if (pendingUser.referringAdminId && pendingUser.referringAdminId.toString() !== req.user.id) {
-        return res.status(403).json({ success: false, message: "Forbidden: You can only approve users you referred or general registrations." });
+      await PendingUser.deleteOne({ _id: pendingUserId, organizationId: req.user.organizationId });
+      return res.status(409).json({ success: false, error: 'User with this email or unique ID already exists in this organization. Pending entry removed.' });
     }
     
-    // Determine final role for the approved user
-    const adminCount = await User.countDocuments({ role: 'admin' });
-    let finalApprovedRole = 'user'; // Default to user
-
-    // If the pending user was intended to be an admin OR admin explicitly requests to approve as admin
-    if (pendingUser.role === 'admin' || requestedApprovedRole === 'admin') {
-        if (adminCount === 0) { // And no active admin exists, make this the first admin
-            finalApprovedRole = 'admin';
-        } else { // Other admins exist, allow creating another admin
-            finalApprovedRole = 'admin';
+    // Check referral constraint if applicable (within the same organization)
+    if (pendingUser.referringAdminId && pendingUser.referringAdminId.toString() !== req.user.id) {
+        const referrer = await User.findById(pendingUser.referringAdminId);
+        if (!referrer || referrer.organizationId.toString() !== req.user.organizationId) {
+             return res.status(403).json({ success: false, message: "Forbidden: Referral mismatch or referrer not in your organization." });
         }
-    } else { // If pending user role was 'user' and no explicit request to upgrade to admin, keep as 'user'
-        finalApprovedRole = 'user';
+        // If referrer is valid and in same org, current admin can still approve.
+    }
+    
+    let finalApprovedRole = pendingUser.role; // Default to pending user's intended role
+    if (req.user.role === 'admin' && requestedApprovedRole) { // If admin explicitly sets a role during approval
+        if (requestedApprovedRole === 'admin') {
+            // Allow approving as admin within their own organization.
+            finalApprovedRole = 'admin';
+        } else {
+            finalApprovedRole = 'user';
+        }
     }
     
     const newUser = new User({
@@ -117,12 +151,12 @@ router.post('/approve/:id', [verifyToken, isAdmin], async (req, res) => {
       userInterests: userInterests || '',
       phone: phone || '',
       notificationPreference: notificationPreference || 'email',
-      referringAdminId: pendingUser.referringAdminId || req.user.id 
+      referringAdminId: pendingUser.referringAdminId || req.user.id,
+      organizationId: req.user.organizationId // User becomes part of the approving admin's organization
     });
     
     const createdUser = await newUser.save(); 
-
-    await PendingUser.findByIdAndDelete(pendingUserId); 
+    await PendingUser.deleteOne({ _id: pendingUserId, organizationId: req.user.organizationId }); 
 
     res.status(201).json({ success: true, message: 'User approved and account activated.', user: createdUser.toJSON() });
 
@@ -132,6 +166,4 @@ router.post('/approve/:id', [verifyToken, isAdmin], async (req, res) => {
   }
 });
 
-
 module.exports = router;
-    

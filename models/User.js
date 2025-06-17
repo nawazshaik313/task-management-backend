@@ -13,6 +13,7 @@ const userSchema = new mongoose.Schema({
   phone: { type: String, trim: true, default: '' },
   notificationPreference: { type: String, enum: ['email', 'phone', 'none'], default: 'none' },
   referringAdminId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  organizationId: { type: String, required: true, trim: true }, // Changed from ObjectId to String for simplicity, can be admin's own ID initially
   createdAt: { type: Date, default: Date.now }
 });
 

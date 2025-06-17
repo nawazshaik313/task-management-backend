@@ -4,13 +4,17 @@ const router = express.Router();
 const AdminLog = require('../models/AdminLog');
 const { verifyToken, isAdmin } = require('../middleware/auth');
 
-// Create a new admin log entry (Admin only)
+// Create a new admin log entry (Admin only, scoped to organization)
 router.post('/', [verifyToken, isAdmin], async (req, res) => {
   try {
     const { logText, imagePreviewUrl } = req.body;
-    const adminId = req.user.id; // From JWT
-    const adminDisplayName = req.user.displayName; // From JWT
+    const adminId = req.user.id; 
+    const adminDisplayName = req.user.displayName;
+    const organizationId = req.user.organizationId;
 
+    if (!organizationId) {
+      return res.status(403).json({ success: false, message: "Organization context missing for admin." });
+    }
     if (!logText) {
       return res.status(400).json({ success: false, message: "Log text is required." });
     }
@@ -19,7 +23,8 @@ router.post('/', [verifyToken, isAdmin], async (req, res) => {
       adminId,
       adminDisplayName,
       logText,
-      imagePreviewUrl
+      imagePreviewUrl,
+      organizationId
     });
 
     const savedLog = await newLog.save();
@@ -30,10 +35,13 @@ router.post('/', [verifyToken, isAdmin], async (req, res) => {
   }
 });
 
-// Get all admin logs (Admin only, sorted by most recent)
+// Get all admin logs (Admin only, sorted by most recent, scoped to organization)
 router.get('/', [verifyToken, isAdmin], async (req, res) => {
   try {
-    const logs = await AdminLog.find().sort({ timestamp: -1 });
+    if (!req.user.organizationId) {
+      return res.status(403).json({ success: false, message: "Organization context missing for admin." });
+    }
+    const logs = await AdminLog.find({ organizationId: req.user.organizationId }).sort({ timestamp: -1 });
     res.json(logs.map(log => log.toJSON()));
   } catch (err) {
     console.error("Error fetching admin logs:", err);

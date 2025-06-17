@@ -6,7 +6,8 @@ const adminLogSchema = new mongoose.Schema({
   adminDisplayName: { type: String, required: true, trim: true },
   timestamp: { type: Date, default: Date.now },
   logText: { type: String, required: true, trim: true },
-  imagePreviewUrl: { type: String, trim: true } // Optional URL for an image related to the log
+  imagePreviewUrl: { type: String, trim: true }, // Optional URL for an image related to the log
+  organizationId: { type: String, required: true, trim: true }
 });
 
 adminLogSchema.set('toJSON', {

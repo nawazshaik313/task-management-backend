@@ -9,7 +9,8 @@ const pendingUserSchema = new mongoose.Schema({
   role: { type: String, enum: ['admin', 'user'], required: true, default: 'user' },
   uniqueId: { type: String, required: true, unique: true, trim: true },
   submissionDate: { type: Date, default: Date.now },
-  referringAdminId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }
+  referringAdminId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  organizationId: { type: String, trim: true } // Will be set during creation based on context
 });
 
 // Pre-save hook to hash password for pending users as well
