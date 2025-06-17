@@ -5,8 +5,7 @@ const User = require('../models/User');
 const jwt = require('jsonwebtoken');
 const { verifyToken, isAdmin } = require('../middleware/auth'); // Correct path to middleware
 
-// User Registration (Primarily for initial admin, or if general registration directly creates users)
-// For a flow where users are approved from PendingUsers, this might be less used or admin-only.
+// User Registration
 router.post('/register', async (req, res) => {
   const { email, uniqueId, password, displayName, role, position, userInterests, phone, notificationPreference, referringAdminId } = req.body;
 
@@ -20,25 +19,19 @@ router.post('/register', async (req, res) => {
       return res.status(400).json({ success: false, message: 'User with this email or unique ID already exists.' });
     }
 
-    // Determine role: if no admins exist, first user is admin.
-    // If an admin attempts to register another admin when one exists, it should be an error.
     const adminCount = await User.countDocuments({ role: 'admin' });
-    let finalRole = role || 'user'; // Default to user if role not provided
+    let finalRole = role || 'user'; 
 
+    // If it's the very first user registering (no admins exist) and they specified 'admin' or no role (defaulting to admin for first user),
+    // set role to admin. Otherwise, allow 'admin' role if explicitly requested by form.
     if (finalRole === 'admin') {
-      if (adminCount > 0) {
-        // This case should ideally be caught by frontend for admin-initiated creation.
-        // For public registration, frontend also controls this.
-        // If somehow 'admin' role is sent when one exists, block it.
-        return res.status(400).json({ success: false, message: 'An administrator account already exists. Cannot register another admin.' });
-      }
-      // First admin, role remains 'admin'
-    } else if (adminCount === 0 && (req.path === '/register' && !role)) {
-      // If it's the very first user registering publicly and no role specified, make them admin.
-      // This might be specific to initial setup.
+      // Allow creating an admin
+    } else if (adminCount === 0 && !role) { 
+      // If no admins exist AND no role was specified by the registration form,
+      // then this is the first user, make them admin.
       finalRole = 'admin';
     }
-
+    // Otherwise, the role is 'user' or an explicitly set 'admin' for subsequent admins.
 
     const newUser = new User({
       email,
@@ -55,12 +48,11 @@ router.post('/register', async (req, res) => {
 
     await newUser.save();
     
-    // Don't send token on registration, user should log in.
     res.status(201).json({ success: true, message: 'User registered successfully.', user: newUser.toJSON() });
 
   } catch (error) {
     console.error("User registration error:", error);
-    if (error.code === 11000) { // MongoDB duplicate key error
+    if (error.code === 11000) { 
         return res.status(400).json({ success: false, message: 'Email or Unique ID already exists.' });
     }
     res.status(500).json({ success: false, message: 'Server error during registration.', error: error.message });
@@ -85,15 +77,13 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ success: false, message: 'Invalid credentials.' });
     }
 
-    // Explicitly check for JWT_SECRET before attempting to sign a token
     if (!process.env.JWT_SECRET) {
         console.error("FATAL ERROR: JWT_SECRET environment variable is not defined.");
-        // Do not expose details of the error to the client, keep it generic.
         return res.status(500).json({ success: false, message: 'Server configuration error. Please contact administrator.' });
     }
 
     const tokenPayload = {
-      id: user.id, // Use virtual 'id'
+      id: user.id, 
       email: user.email,
       role: user.role,
       displayName: user.displayName,
@@ -105,26 +95,23 @@ router.post('/login', async (req, res) => {
       success: true,
       message: 'Login successful.',
       token,
-      user: tokenPayload // Send back the payload as user object
+      user: tokenPayload 
     });
   } catch (error) {
-    console.error("Login error:", error); // Log the actual error on the server
+    console.error("Login error:", error); 
     res.status(500).json({ success: false, message: 'Server error during login.' });
   }
 });
 
 // User Logout (Conceptual - JWTs are managed client-side)
 router.post('/logout', (req, res) => {
-  // For JWT, logout is primarily a client-side action (deleting the token).
-  // Backend can have a route for completeness or if using refresh tokens/blacklisting.
   res.json({ success: true, message: 'Logged out successfully (client-side action required).' });
 });
 
 // Get Current Logged-in User
 router.get('/current', verifyToken, async (req, res) => {
   try {
-    // req.user is populated by verifyToken middleware
-    const user = await User.findById(req.user.id).select('-password'); // Exclude password
+    const user = await User.findById(req.user.id).select('-password'); 
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found.' });
     }
@@ -145,14 +132,10 @@ router.get('/', [verifyToken, isAdmin], async (req, res) => {
   }
 });
 
-// Endpoint for frontend to check admin existence during registration
 router.get('/all-for-status-check', async (req, res) => {
   try {
-    // Only return a minimal set of data, or just the count, to avoid exposing all user data publicly.
-    // For this purpose, returning all users (even if minimal fields) might be okay for a small app,
-    // but for larger apps, a dedicated `GET /users/status/admin-exists` endpoint would be better.
-    const users = await User.find().select('role'); // Only select role to check for admin
-    res.json(users.map(u => ({ role: u.role, id: u.id }))); // Send minimal data
+    const users = await User.find().select('role'); 
+    res.json(users.map(u => ({ role: u.role, id: u.id }))); 
   } catch (error) {
     console.error("Error fetching users for status check:", error);
     res.status(500).json({ success: false, message: 'Server error while checking user status.' });
@@ -163,7 +146,6 @@ router.get('/all-for-status-check', async (req, res) => {
 // Get user by ID (Protected)
 router.get('/:id', verifyToken, async (req, res) => {
   try {
-    // Admin can get any user, regular user can only get their own profile via /current
     if (req.user.role !== 'admin' && req.user.id !== req.params.id) {
         return res.status(403).json({ success: false, message: 'Forbidden: You can only view your own profile or an admin can view any profile.' });
     }
@@ -178,7 +160,6 @@ router.get('/:id', verifyToken, async (req, res) => {
 });
 
 // Update user by ID (Protected)
-// Users can update their own profile. Admins can update any profile.
 router.put('/:id', verifyToken, async (req, res) => {
   const { email, uniqueId, displayName, position, userInterests, phone, notificationPreference, role, password } = req.body;
   const userIdToUpdate = req.params.id;
@@ -193,8 +174,7 @@ router.put('/:id', verifyToken, async (req, res) => {
       return res.status(404).json({ success: false, message: 'User not found.' });
     }
 
-    // Check for unique fields if changed
-    if (email && email.toLowerCase() !== user.email) { // compare lowercase
+    if (email && email.toLowerCase() !== user.email) { 
         const existingByEmail = await User.findOne({ email: email.toLowerCase() });
         if (existingByEmail && existingByEmail.id !== userIdToUpdate) {
             return res.status(400).json({ success: false, message: 'Email already in use.' });
@@ -215,42 +195,31 @@ router.put('/:id', verifyToken, async (req, res) => {
     if (phone !== undefined) user.phone = phone;
     if (notificationPreference) user.notificationPreference = notificationPreference;
     
-    // Role change logic:
-    if (req.user.role === 'admin' && role) { // Admin is attempting to set a role
-        const targetUserIsAdmin = user.role === 'admin';
-        if (role === 'admin') { // Trying to make/keep target user an admin
-            if (!targetUserIsAdmin) { // If promoting a user to admin
-                const adminCount = await User.countDocuments({ role: 'admin' });
-                if (adminCount > 0) { // An admin already exists
-                    return res.status(400).json({ success: false, message: 'An administrator account already exists. Cannot promote another user to admin.' });
-                }
+    if (req.user.role === 'admin' && role) { 
+        // Admin can set role. If demoting the sole admin, it might be an issue.
+        // For now, allow admin to set role as requested.
+        // More complex rules (like preventing demotion of last admin) can be added if needed.
+        if (role === 'user' && user.role === 'admin') {
+            // Check if this is the SOLE admin
+            const adminCount = await User.countDocuments({ role: 'admin' });
+            if (adminCount === 1 && user.id === userIdToUpdate) { 
+                return res.status(400).json({ success: false, message: 'The sole administrator cannot be demoted to user.' });
             }
-            user.role = 'admin';
-        } else if (role === 'user') { // Trying to make target user a 'user'
-            if (targetUserIsAdmin) { // If demoting an admin
-                // Check if this is the sole admin
-                const adminCount = await User.countDocuments({ role: 'admin' });
-                if (adminCount === 1 && user.id === userIdToUpdate) { // Target is the SOLE admin
-                    return res.status(400).json({ success: false, message: 'The sole administrator cannot be demoted to user.' });
-                }
-            }
-            user.role = 'user';
         }
+        user.role = role;
     } else if (role && user.role !== role && req.user.id === userIdToUpdate) {
-        // Non-admin user trying to change their own role OR admin trying to change their own role (which should be via profile, but not role)
         return res.status(403).json({ success: false, message: 'Role modification not permitted for your own account here or by non-admins.' });
     }
 
-
-    if (password) { // If password is being updated
-      user.password = password; // The pre-save hook will hash it
+    if (password) { 
+      user.password = password; 
     }
 
     const updatedUser = await user.save();
     res.json({ success: true, message: 'User updated successfully.', user: updatedUser.toJSON() });
   } catch (error) {
     console.error("Update user error:", error);
-    if (error.code === 11000) { // MongoDB duplicate key error
+    if (error.code === 11000) { 
         return res.status(400).json({ success: false, message: 'Email or Unique ID already exists.' });
     }
     res.status(500).json({ success: false, message: 'Server error while updating user.', error: error.message });
@@ -264,11 +233,13 @@ router.delete('/:id', [verifyToken, isAdmin], async (req, res) => {
     if (!userToDelete) {
       return res.status(404).json({ success: false, message: 'User not found.' });
     }
-    // Prevent admin from deleting their own account
     if (req.user.id === req.params.id) {
         return res.status(400).json({ success: false, message: "Admins cannot delete their own account." });
     }
     // Prevent deletion if the user is the sole admin
+    // This check is good to keep even in multi-admin if you want at least one admin.
+    // However, if the goal is truly "any admin can delete any other admin", this could be removed.
+    // For safety, keeping it to prevent removing *all* admin capabilities.
     if (userToDelete.role === 'admin') {
         const adminCount = await User.countDocuments({ role: 'admin' });
         if (adminCount === 1) {
@@ -277,8 +248,6 @@ router.delete('/:id', [verifyToken, isAdmin], async (req, res) => {
     }
     
     await User.findByIdAndDelete(req.params.id);
-    // TODO: Consider what happens to assignments or other related data.
-    // For now, just deleting the user.
     res.json({ success: true, message: 'User deleted successfully.' });
   } catch (error) {
     console.error("Delete user error:", error);
@@ -287,7 +256,7 @@ router.delete('/:id', [verifyToken, isAdmin], async (req, res) => {
 });
 
 
-// Forgot Password Request (generates a token, sends email - actual email sending not implemented here)
+// Forgot Password Request
 router.post('/forgot-password', async (req, res) => {
     const { email } = req.body;
     if (!email) {
@@ -296,7 +265,6 @@ router.post('/forgot-password', async (req, res) => {
     try {
         const user = await User.findOne({ email: email.toLowerCase() });
         if (!user) {
-            // Still return a generic message to prevent email enumeration
             return res.status(200).json({ success: true, message: 'If an account with that email exists, a password reset link has been sent.' });
         }
         
@@ -305,13 +273,9 @@ router.post('/forgot-password', async (req, res) => {
             return res.status(500).json({ success: false, message: 'Server configuration error for password reset.' });
         }
 
-        // Create a short-lived reset token (example, not cryptographically secure for production without more)
-        // In a real app, use a crypto-secure random string, store its hash with an expiry in the DB.
         const resetToken = jwt.sign({ id: user.id, type: 'password_reset' }, process.env.JWT_SECRET, { expiresIn: '15m' }); 
         
-        // TODO: Implement actual email sending here with the resetToken
         console.log(`Password reset requested for ${email}. Token: ${resetToken}. Link should be: /reset-password?token=${resetToken}`);
-        // Example: await sendPasswordResetEmail(user.email, resetToken);
 
         res.status(200).json({ success: true, message: 'If an account with that email exists, a password reset link has been sent.' });
     } catch (error) {
@@ -334,7 +298,6 @@ router.post('/reset-password', async (req, res) => {
             return res.status(500).json({ success: false, message: 'Server configuration error for password reset.' });
         }
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        // Verify this token was intended for password reset (if you add a 'type' field during signing)
         if (decoded.type !== 'password_reset') {
              return res.status(400).json({ success: false, message: 'Invalid token type.' });
         }
@@ -345,11 +308,11 @@ router.post('/reset-password', async (req, res) => {
             return res.status(400).json({ success: false, message: 'Invalid or expired reset token (user not found).' });
         }
 
-        user.password = newPassword; // Pre-save hook will hash
+        user.password = newPassword; 
         await user.save();
 
         res.json({ success: true, message: 'Password has been reset successfully.' });
-    } catch (error) { // Catches JWT errors (expired, invalid) and DB errors
+    } catch (error) { 
         console.error("Reset password error:", error);
         res.status(400).json({ success: false, message: 'Invalid or expired reset token, or server error.' });
     }
@@ -357,3 +320,4 @@ router.post('/reset-password', async (req, res) => {
 
 
 module.exports = router;
+      

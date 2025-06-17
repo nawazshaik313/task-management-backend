@@ -2,7 +2,7 @@
 const express = require('express');
 const router = express.Router();
 const PendingUser = require('../models/PendingUser');
-const User = require('../models/User'); // For creating user upon approval
+const User = require('../models/User'); 
 const { verifyToken, isAdmin } = require('../middleware/auth');
 
 // Create a new pending user registration
@@ -14,7 +14,6 @@ router.post('/', async (req, res) => {
   }
 
   try {
-    // Check if email or uniqueId already exists in User or PendingUser collections
     const existingUser = await User.findOne({ $or: [{ email: email.toLowerCase() }, { uniqueId }] });
     if (existingUser) {
       return res.status(409).json({ success: false, error: 'Email or Unique ID already registered as an active user.' });
@@ -24,25 +23,14 @@ router.post('/', async (req, res) => {
       return res.status(409).json({ success: false, error: 'Email or Unique ID already pending approval.' });
     }
     
-    // Enforce single admin policy for pending user's role
-    const adminCount = await User.countDocuments({ role: 'admin' });
-    if (role === 'admin' && adminCount > 0) {
-        console.warn(`Attempt to create pending user ${email} with role 'admin', but an admin already exists. Downgrading to 'user'.`);
-        role = 'user'; // Downgrade role if an admin exists
-    } else if (role === 'admin' && adminCount === 0) {
-        // This is fine, could be the first admin being set up via a pending route (if workflow supports)
-    } else if (role !== 'admin' && adminCount === 0) {
-        // If it's the first user and they are not registering as admin, this is also fine.
-        // The approval step or first general registration might make them admin.
-    }
-
-
-    // Password will be hashed by the pre-save hook in PendingUser model
+    // Allow 'admin' role for pending user directly. Approval logic will handle final creation.
+    // The role from req.body will be used directly for the PendingUser document.
+    
     const newPendingUser = new PendingUser({
       displayName,
       email,
       password, 
-      role, // Use the potentially adjusted role
+      role, // Use role from request; no downgrade here
       uniqueId,
       referringAdminId: referringAdminId || null
     });
@@ -86,7 +74,6 @@ router.delete('/:id', [verifyToken, isAdmin], async (req, res) => {
 // Approve a pending user (Admin only)
 router.post('/approve/:id', [verifyToken, isAdmin], async (req, res) => {
   const pendingUserId = req.params.id;
-  // Admin might provide updated details during approval, e.g., position.
   const { position, userInterests, phone, notificationPreference, role: requestedApprovedRole } = req.body;
 
   try {
@@ -95,16 +82,12 @@ router.post('/approve/:id', [verifyToken, isAdmin], async (req, res) => {
       return res.status(404).json({ success: false, error: 'Pending user not found.' });
     }
 
-    // Check if user with this email or uniqueId already exists in main User collection
     const existingUser = await User.findOne({ $or: [{ email: pendingUser.email }, { uniqueId: pendingUser.uniqueId }] });
     if (existingUser) {
-      // If user somehow got created, delete pending and inform admin
       await PendingUser.findByIdAndDelete(pendingUserId);
       return res.status(409).json({ success: false, error: 'User with this email or unique ID already exists. Pending entry removed.' });
     }
 
-    // Authorization: If pre-registered, only referring admin can approve.
-    // req.user.id is the ID of the admin making the request.
     if (pendingUser.referringAdminId && pendingUser.referringAdminId.toString() !== req.user.id) {
         return res.status(403).json({ success: false, message: "Forbidden: You can only approve users you referred or general registrations." });
     }
@@ -113,34 +96,33 @@ router.post('/approve/:id', [verifyToken, isAdmin], async (req, res) => {
     const adminCount = await User.countDocuments({ role: 'admin' });
     let finalApprovedRole = 'user'; // Default to user
 
-    // If the pending user was intended to be an admin OR admin requests to approve as admin
+    // If the pending user was intended to be an admin OR admin explicitly requests to approve as admin
     if (pendingUser.role === 'admin' || requestedApprovedRole === 'admin') {
-        if (adminCount === 0) { // And no active admin exists
+        if (adminCount === 0) { // And no active admin exists, make this the first admin
             finalApprovedRole = 'admin';
-        } else { // An active admin exists, so this pending 'admin' must be downgraded or request denied
-            console.warn(`Attempt to approve user ${pendingUser.email} as 'admin', but an admin already exists. Role will be 'user'.`);
-            finalApprovedRole = 'user'; // Force to user
+        } else { // Other admins exist, allow creating another admin
+            finalApprovedRole = 'admin';
         }
+    } else { // If pending user role was 'user' and no explicit request to upgrade to admin, keep as 'user'
+        finalApprovedRole = 'user';
     }
     
     const newUser = new User({
       email: pendingUser.email,
       uniqueId: pendingUser.uniqueId,
-      password: pendingUser.password, // This is already hashed from PendingUser model. User model's pre-save MUST handle this.
+      password: pendingUser.password, 
       displayName: pendingUser.displayName,
       role: finalApprovedRole,
-      position: position || 'Default Position', // Set default or from request
+      position: position || 'Default Position', 
       userInterests: userInterests || '',
       phone: phone || '',
       notificationPreference: notificationPreference || 'email',
-      referringAdminId: pendingUser.referringAdminId || req.user.id // Admin who approved or original referrer
+      referringAdminId: pendingUser.referringAdminId || req.user.id 
     });
     
-    // The User model's pre-save hook is expected to be smart enough not to re-hash an already hashed password.
-    // (e.g., by checking if `this.password` starts with bcrypt's pattern like $2a$, $2b$)
     const createdUser = await newUser.save(); 
 
-    await PendingUser.findByIdAndDelete(pendingUserId); // Remove from pending
+    await PendingUser.findByIdAndDelete(pendingUserId); 
 
     res.status(201).json({ success: true, message: 'User approved and account activated.', user: createdUser.toJSON() });
 
@@ -152,3 +134,4 @@ router.post('/approve/:id', [verifyToken, isAdmin], async (req, res) => {
 
 
 module.exports = router;
+    
