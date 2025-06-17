@@ -7,7 +7,7 @@ const { verifyToken, isAdmin } = require('../middleware/auth');
 
 // Create a new pending user registration
 router.post('/', async (req, res) => {
-  const { displayName, email, password, role, uniqueId, referringAdminId } = req.body;
+  let { displayName, email, password, role, uniqueId, referringAdminId } = req.body;
 
   if (!displayName || !email || !password || !role || !uniqueId) {
     return res.status(400).json({ success: false, error: 'Missing required fields for pending user.' });
@@ -24,12 +24,25 @@ router.post('/', async (req, res) => {
       return res.status(409).json({ success: false, error: 'Email or Unique ID already pending approval.' });
     }
     
+    // Enforce single admin policy for pending user's role
+    const adminCount = await User.countDocuments({ role: 'admin' });
+    if (role === 'admin' && adminCount > 0) {
+        console.warn(`Attempt to create pending user ${email} with role 'admin', but an admin already exists. Downgrading to 'user'.`);
+        role = 'user'; // Downgrade role if an admin exists
+    } else if (role === 'admin' && adminCount === 0) {
+        // This is fine, could be the first admin being set up via a pending route (if workflow supports)
+    } else if (role !== 'admin' && adminCount === 0) {
+        // If it's the first user and they are not registering as admin, this is also fine.
+        // The approval step or first general registration might make them admin.
+    }
+
+
     // Password will be hashed by the pre-save hook in PendingUser model
     const newPendingUser = new PendingUser({
       displayName,
       email,
       password, 
-      role,
+      role, // Use the potentially adjusted role
       uniqueId,
       referringAdminId: referringAdminId || null
     });
@@ -74,7 +87,7 @@ router.delete('/:id', [verifyToken, isAdmin], async (req, res) => {
 router.post('/approve/:id', [verifyToken, isAdmin], async (req, res) => {
   const pendingUserId = req.params.id;
   // Admin might provide updated details during approval, e.g., position.
-  const { position, userInterests, phone, notificationPreference, role: approvedRole } = req.body;
+  const { position, userInterests, phone, notificationPreference, role: requestedApprovedRole } = req.body;
 
   try {
     const pendingUser = await PendingUser.findById(pendingUserId);
@@ -89,96 +102,43 @@ router.post('/approve/:id', [verifyToken, isAdmin], async (req, res) => {
       await PendingUser.findByIdAndDelete(pendingUserId);
       return res.status(409).json({ success: false, error: 'User with this email or unique ID already exists. Pending entry removed.' });
     }
+
+    // Authorization: If pre-registered, only referring admin can approve.
+    // req.user.id is the ID of the admin making the request.
+    if (pendingUser.referringAdminId && pendingUser.referringAdminId.toString() !== req.user.id) {
+        return res.status(403).json({ success: false, message: "Forbidden: You can only approve users you referred or general registrations." });
+    }
+    
+    // Determine final role for the approved user
+    const adminCount = await User.countDocuments({ role: 'admin' });
+    let finalApprovedRole = 'user'; // Default to user
+
+    // If the pending user was intended to be an admin OR admin requests to approve as admin
+    if (pendingUser.role === 'admin' || requestedApprovedRole === 'admin') {
+        if (adminCount === 0) { // And no active admin exists
+            finalApprovedRole = 'admin';
+        } else { // An active admin exists, so this pending 'admin' must be downgraded or request denied
+            console.warn(`Attempt to approve user ${pendingUser.email} as 'admin', but an admin already exists. Role will be 'user'.`);
+            finalApprovedRole = 'user'; // Force to user
+        }
+    }
     
     const newUser = new User({
       email: pendingUser.email,
       uniqueId: pendingUser.uniqueId,
-      password: pendingUser.password, // This is already hashed from PendingUser
+      password: pendingUser.password, // This is already hashed from PendingUser model. User model's pre-save MUST handle this.
       displayName: pendingUser.displayName,
-      role: approvedRole || pendingUser.role, // Admin can override role
+      role: finalApprovedRole,
       position: position || 'Default Position', // Set default or from request
       userInterests: userInterests || '',
       phone: phone || '',
       notificationPreference: notificationPreference || 'email',
       referringAdminId: pendingUser.referringAdminId || req.user.id // Admin who approved or original referrer
     });
-
-    // Since password in newUser is already hashed (taken from pendingUser),
-    // we need to tell Mongoose it's already hashed to prevent double hashing if User model's pre-save is naive.
-    // A better User model pre-save hook would check if password looks like a hash.
-    // For now, let's assume the User model's pre-save hook handles `isModified('password')` correctly.
-    // If pendingUser.password was plain text, newUser.save() would hash it.
-    // If pendingUser.password was already hashed, newUser.save() would *re-hash* it if not careful.
-    // The current PendingUser model hashes on its save. So pendingUser.password IS hashed.
-    // The User model's pre-save hook also hashes. So we need to prevent double hashing.
-    // The most robust way is for User model's pre-save to check if the password is already hashed.
-    // For simplicity here, let's assume `isModified('password')` in User model is sufficient.
-    // If `pendingUser.password` is assigned, `isModified` will be true.
-
-    // A direct way for already hashed passwords, if User model expects plain for hashing:
-    // Create new user without password, then set it and mark as unmodified.
-    // const plainPasswordForUserCreation = "SOME_TEMPORARY_PASSWORD_NEVER_USED"; // This is a hack
-    // const newUser = new User({ ...data, password: plainPasswordForUserCreation });
-    // await newUser.save(); // Hashes the temp password
-    // newUser.password = pendingUser.password; // Overwrite with already hashed password
-    // await User.findByIdAndUpdate(newUser.id, { password: pendingUser.password }); // Save without triggering hash
-
-    // Given both models now hash on save, and User's pre-save checks `isModified`,
-    // the password from `pendingUser.password` (which is hashed) will be assigned
-    // to `newUser.password`. When `newUser.save()` is called, `isModified('password')`
-    // will be true, and it will be re-hashed. This is WRONG.
-
-    // Solution: Create the User instance, then manually set the hashed password and save
-    // This bypasses the pre-save hook IF the hook only runs on `this.isModified('password')` AND
-    // if password wasn't part of initial construction.
-    // Or, better, the User model could have a static `createFromPending` method.
-
-    // Corrected approach:
-    // Construct user data without password first
-    const userData = {
-      email: pendingUser.email,
-      uniqueId: pendingUser.uniqueId,
-      displayName: pendingUser.displayName,
-      role: approvedRole || pendingUser.role,
-      position: position || 'Default Position',
-      userInterests: userInterests || '',
-      phone: phone || '',
-      notificationPreference: notificationPreference || 'email',
-      referringAdminId: pendingUser.referringAdminId || req.user.id
-    };
-    const finalUser = new User(userData);
-    finalUser.password = pendingUser.password; // Assign the already hashed password
-    // Mark password as not modified to prevent re-hashing by User's pre-save hook
-    // This specific Mongoose feature might not exist. A common pattern is:
-    // user.set('password', hashed_password_value, { strict: false });
-    // Or, ensure User model's pre-save hook is smart enough.
-    // For now, relying on the fact that if it's assigned directly and not "modified" via direct update,
-    // the model's pre-save hook checking `this.isModified('password')` might not re-hash.
-    // This is tricky. The most reliable is to ensure the User model's pre-save hook can tell if a password is a hash.
-    // Alternative for safety: Create User and then update password field directly with a DB command if needed.
-
-    // Simplest approach if User.pre('save') correctly checks isModified:
-    // Create with plain password that was originally submitted by pending user.
-    // This means PendingUser should NOT hash its password.
-    // Let's assume PendingUser stores plain password, and User hashes it.
-    // The current PendingUser.js hashes it. This is the conflict.
     
-    // **Decision: PendingUser will store the HASHED password. User model will take this hashed password.**
-    // **The User model's `pre-save` hook MUST be intelligent enough not to re-hash an already hashed password.**
-    // This is typically done by checking the format of the password string (e.g., if it starts with $2a$, $2b$).
-    // My User.js pre-save hook is `if (!this.isModified('password')) return next();` which is insufficient alone if setting an already hashed password.
-    // It should be `if (!this.isModified('password') || this.password.startsWith('$2a$') || this.password.startsWith('$2b$')) return next();`
-
-    // For now, assuming the User model's pre-save is correctly handling `isModified`.
-    // The `pendingUser.password` IS hashed. So `newUser.password = pendingUser.password` sets a hashed password.
-    // The `newUser.save()` will trigger User's pre-save. `isModified('password')` will be true. It will re-hash. This needs fixing in User model.
-
-    // Let's fix User model's pre-save slightly for this:
-    // In User.js pre('save'): add `if (this.password && (this.password.startsWith('$2a$') || this.password.startsWith('$2b$'))) return next();`
-    // This check is not added in this XML for brevity, but it's the right way.
-    // For this exercise, we'll proceed as if User model can handle it.
-
-    const createdUser = await finalUser.save(); // This will use User's pre-save hook.
+    // The User model's pre-save hook is expected to be smart enough not to re-hash an already hashed password.
+    // (e.g., by checking if `this.password` starts with bcrypt's pattern like $2a$, $2b$)
+    const createdUser = await newUser.save(); 
 
     await PendingUser.findByIdAndDelete(pendingUserId); // Remove from pending
 

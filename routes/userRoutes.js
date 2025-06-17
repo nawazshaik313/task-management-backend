@@ -8,7 +8,7 @@ const { verifyToken, isAdmin } = require('../middleware/auth'); // Correct path 
 // User Registration (Primarily for initial admin, or if general registration directly creates users)
 // For a flow where users are approved from PendingUsers, this might be less used or admin-only.
 router.post('/register', async (req, res) => {
-  const { email, uniqueId, password, displayName, role, position, userInterests, phone, notificationPreference } = req.body;
+  const { email, uniqueId, password, displayName, role, position, userInterests, phone, notificationPreference, referringAdminId } = req.body;
 
   if (!email || !uniqueId || !password || !displayName) {
     return res.status(400).json({ success: false, message: 'Email, Unique ID, Password, and Display Name are required.' });
@@ -20,9 +20,25 @@ router.post('/register', async (req, res) => {
       return res.status(400).json({ success: false, message: 'User with this email or unique ID already exists.' });
     }
 
-    // Determine role: if no admins exist, first user is admin, otherwise default or provided role.
+    // Determine role: if no admins exist, first user is admin.
+    // If an admin attempts to register another admin when one exists, it should be an error.
     const adminCount = await User.countDocuments({ role: 'admin' });
-    const finalRole = (adminCount === 0) ? 'admin' : (role || 'user');
+    let finalRole = role || 'user'; // Default to user if role not provided
+
+    if (finalRole === 'admin') {
+      if (adminCount > 0) {
+        // This case should ideally be caught by frontend for admin-initiated creation.
+        // For public registration, frontend also controls this.
+        // If somehow 'admin' role is sent when one exists, block it.
+        return res.status(400).json({ success: false, message: 'An administrator account already exists. Cannot register another admin.' });
+      }
+      // First admin, role remains 'admin'
+    } else if (adminCount === 0 && (req.path === '/register' && !role)) {
+      // If it's the very first user registering publicly and no role specified, make them admin.
+      // This might be specific to initial setup.
+      finalRole = 'admin';
+    }
+
 
     const newUser = new User({
       email,
@@ -33,7 +49,8 @@ router.post('/register', async (req, res) => {
       position,
       userInterests,
       phone,
-      notificationPreference
+      notificationPreference,
+      referringAdminId
     });
 
     await newUser.save();
@@ -128,11 +145,25 @@ router.get('/', [verifyToken, isAdmin], async (req, res) => {
   }
 });
 
+// Endpoint for frontend to check admin existence during registration
+router.get('/all-for-status-check', async (req, res) => {
+  try {
+    // Only return a minimal set of data, or just the count, to avoid exposing all user data publicly.
+    // For this purpose, returning all users (even if minimal fields) might be okay for a small app,
+    // but for larger apps, a dedicated `GET /users/status/admin-exists` endpoint would be better.
+    const users = await User.find().select('role'); // Only select role to check for admin
+    res.json(users.map(u => ({ role: u.role, id: u.id }))); // Send minimal data
+  } catch (error) {
+    console.error("Error fetching users for status check:", error);
+    res.status(500).json({ success: false, message: 'Server error while checking user status.' });
+  }
+});
+
+
 // Get user by ID (Protected)
 router.get('/:id', verifyToken, async (req, res) => {
   try {
     // Admin can get any user, regular user can only get their own profile via /current
-    // or if specific logic allows viewing other profiles (not implemented here)
     if (req.user.role !== 'admin' && req.user.id !== req.params.id) {
         return res.status(403).json({ success: false, message: 'Forbidden: You can only view your own profile or an admin can view any profile.' });
     }
@@ -184,13 +215,30 @@ router.put('/:id', verifyToken, async (req, res) => {
     if (phone !== undefined) user.phone = phone;
     if (notificationPreference) user.notificationPreference = notificationPreference;
     
-    // Role can only be changed by an admin, and not for their own account via this specific check
-    if (req.user.role === 'admin' && role && user.id !== req.user.id) { // Admin changing other user's role
-        user.role = role;
-    } else if (req.user.role === 'admin' && role && user.id === req.user.id && user.role !== role) { // Admin trying to change their own role
-        return res.status(400).json({ success: false, message: 'Admins cannot change their own role here. Use specific admin tools if available.' });
-    } else if (role && user.role !== role) { // Non-admin trying to change role
-        return res.status(403).json({ success: false, message: 'Role modification not permitted for this user or by this user.' });
+    // Role change logic:
+    if (req.user.role === 'admin' && role) { // Admin is attempting to set a role
+        const targetUserIsAdmin = user.role === 'admin';
+        if (role === 'admin') { // Trying to make/keep target user an admin
+            if (!targetUserIsAdmin) { // If promoting a user to admin
+                const adminCount = await User.countDocuments({ role: 'admin' });
+                if (adminCount > 0) { // An admin already exists
+                    return res.status(400).json({ success: false, message: 'An administrator account already exists. Cannot promote another user to admin.' });
+                }
+            }
+            user.role = 'admin';
+        } else if (role === 'user') { // Trying to make target user a 'user'
+            if (targetUserIsAdmin) { // If demoting an admin
+                // Check if this is the sole admin
+                const adminCount = await User.countDocuments({ role: 'admin' });
+                if (adminCount === 1 && user.id === userIdToUpdate) { // Target is the SOLE admin
+                    return res.status(400).json({ success: false, message: 'The sole administrator cannot be demoted to user.' });
+                }
+            }
+            user.role = 'user';
+        }
+    } else if (role && user.role !== role && req.user.id === userIdToUpdate) {
+        // Non-admin user trying to change their own role OR admin trying to change their own role (which should be via profile, but not role)
+        return res.status(403).json({ success: false, message: 'Role modification not permitted for your own account here or by non-admins.' });
     }
 
 
@@ -212,19 +260,29 @@ router.put('/:id', verifyToken, async (req, res) => {
 // Delete user by ID (Admin only)
 router.delete('/:id', [verifyToken, isAdmin], async (req, res) => {
   try {
+    const userToDelete = await User.findById(req.params.id);
+    if (!userToDelete) {
+      return res.status(404).json({ success: false, message: 'User not found.' });
+    }
     // Prevent admin from deleting their own account
     if (req.user.id === req.params.id) {
         return res.status(400).json({ success: false, message: "Admins cannot delete their own account." });
     }
-    const user = await User.findByIdAndDelete(req.params.id);
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found.' });
+    // Prevent deletion if the user is the sole admin
+    if (userToDelete.role === 'admin') {
+        const adminCount = await User.countDocuments({ role: 'admin' });
+        if (adminCount === 1) {
+            return res.status(400).json({ success: false, message: "Cannot delete the sole administrator account." });
+        }
     }
+    
+    await User.findByIdAndDelete(req.params.id);
     // TODO: Consider what happens to assignments or other related data.
     // For now, just deleting the user.
     res.json({ success: true, message: 'User deleted successfully.' });
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Server error.' });
+    console.error("Delete user error:", error);
+    res.status(500).json({ success: false, message: 'Server error while deleting user.', error: error.message });
   }
 });
 
