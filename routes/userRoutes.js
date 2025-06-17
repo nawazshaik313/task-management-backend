@@ -9,6 +9,30 @@ const { verifyToken, isAdmin } = require('../middleware/auth');
 const path = require('path');
 const emailService = require(path.join(__dirname, '../utils/emailService.js'));
 
+// New endpoint for validating admin referral ID
+router.get('/validate-admin-ref/:adminId', async (req, res) => {
+  try {
+    const adminId = req.params.adminId;
+    if (!mongoose.Types.ObjectId.isValid(adminId)) {
+      return res.json({ success: true, isValidRef: false, message: 'Invalid admin ID format.' });
+    }
+    const user = await User.findById(adminId);
+    if (user && user.role === 'admin' && user.organizationId) {
+      res.json({ 
+        success: true, 
+        isValidRef: true, 
+        displayName: user.displayName, 
+        organizationId: user.organizationId 
+      });
+    } else {
+      res.json({ success: true, isValidRef: false, message: 'Referring admin not found, is not an admin, or has no organization.' });
+    }
+  } catch (error) {
+    console.error("Error validating admin ref:", error);
+    res.status(500).json({ success: false, message: 'Server error during admin reference validation.' });
+  }
+});
+
 // User Registration
 router.post('/register', async (req, res) => {
   const { email, uniqueId, password, displayName, role, position, userInterests, phone, notificationPreference, referringAdminId, companyName } = req.body; // Changed organizationName to companyName
@@ -30,11 +54,11 @@ router.post('/register', async (req, res) => {
       organizationIdToSet = new mongoose.Types.ObjectId().toString(); // Generate unique Org ID
       newAdminCompanyName = companyName; // Use companyName for email
 
-      // Ensure no user (admin or otherwise) already exists with this email or uniqueId system-wide if it's a new admin
-      let existingUserGlobal = await User.findOne({ $or: [{ email: email.toLowerCase() }, { uniqueId }] });
-      if (existingUserGlobal) {
-        return res.status(400).json({ success: false, message: 'User with this email or unique ID already exists globally. Cannot register new admin.' });
-      }
+      // REMOVED GLOBAL CHECK:
+      // let existingUserGlobal = await User.findOne({ $or: [{ email: email.toLowerCase() }, { uniqueId }] });
+      // if (existingUserGlobal) {
+      //   return res.status(400).json({ success: false, message: 'User with this email or unique ID already exists globally. Cannot register new admin.' });
+      // }
 
     } else { // Role is 'user'
       if (req.body.organizationId) { // Admin creating user directly
@@ -373,7 +397,7 @@ router.post('/forgot-password', async (req, res) => {
             { expiresIn: '15m' }
         ); 
         
-        const resetLink = `${process.env.FRONTEND_URL}#PasswordReset?token=${resetToken}`;
+        const resetLink = `${process.env.FRONTEND_URL || 'about:blank'}#PasswordReset?token=${resetToken}`; // Use about:blank if FRONTEND_URL not set for safety
         
         emailService.sendPasswordResetEmail(user.email, user.displayName, resetLink)
           .catch(err => console.error("EmailJS Error (sendPasswordResetEmail):", err));
