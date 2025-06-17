@@ -3,8 +3,8 @@ const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 
 const userSchema = new mongoose.Schema({
-  email: { type: String, required: true, unique: true, trim: true, lowercase: true, index: true },
-  uniqueId: { type: String, required: true, unique: true, trim: true, index: true },
+  email: { type: String, required: true, trim: true, lowercase: true, index: true }, // unique:true removed
+  uniqueId: { type: String, required: true, trim: true, index: true }, // unique:true removed
   password: { type: String, required: true },
   role: { type: String, enum: ['admin', 'user'], required: true, default: 'user' },
   displayName: { type: String, required: true, trim: true },
@@ -13,9 +13,13 @@ const userSchema = new mongoose.Schema({
   phone: { type: String, trim: true, default: '' },
   notificationPreference: { type: String, enum: ['email', 'phone', 'none'], default: 'none' },
   referringAdminId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
-  organizationId: { type: String, required: true, index: true }, // Added organizationId
+  organizationId: { type: String, required: true, index: true },
   createdAt: { type: Date, default: Date.now }
 });
+
+// Compound unique indexes for multi-tenancy
+userSchema.index({ email: 1, organizationId: 1 }, { unique: true });
+userSchema.index({ uniqueId: 1, organizationId: 1 }, { unique: true });
 
 // Pre-save hook to hash password
 userSchema.pre('save', async function (next) {
