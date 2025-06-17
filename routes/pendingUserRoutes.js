@@ -4,7 +4,8 @@ const router = express.Router();
 const PendingUser = require('../models/PendingUser');
 const User = require('../models/User');
 const { verifyToken, isAdmin } = require('../middleware/auth');
-const emailService = require('../utils/emailService');
+const path = require('path');
+const emailService = require(path.join(__dirname, '../utils/emailService.js'));
 
 // Create a new pending user registration (typically from pre-registration link)
 router.post('/', async (req, res) => {

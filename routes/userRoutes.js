@@ -6,7 +6,8 @@ const User = require('../models/User');
 const PendingUser = require('../models/PendingUser'); // For general registration pending flow
 const jwt = require('jsonwebtoken');
 const { verifyToken, isAdmin } = require('../middleware/auth');
-const emailService = require('../utils/emailService');
+const path = require('path');
+const emailService = require(path.join(__dirname, '../utils/emailService.js'));
 
 // User Registration
 router.post('/register', async (req, res) => {

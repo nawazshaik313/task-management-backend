@@ -5,7 +5,8 @@ const Assignment = require("../models/Assignment");
 const Task = require('../models/Task');
 const User = require('../models/User');
 const { verifyToken, isAdmin } = require('../middleware/auth');
-const emailService = require('../utils/emailService');
+const path = require('path');
+const emailService = require(path.join(__dirname, '../utils/emailService.js'));
 
 // Create a new assignment (Admin only, scoped to their organization)
 router.post("/", [verifyToken, isAdmin], async (req, res) => {
