@@ -4,25 +4,22 @@ const router = express.Router();
 const AdminLog = require('../models/AdminLog');
 const { verifyToken, isAdmin } = require('../middleware/auth');
 
-// Create a new admin log entry (Admin only, scoped to organization)
+// Create a new admin log entry (Admin only, scoped to their organization)
 router.post('/', [verifyToken, isAdmin], async (req, res) => {
   try {
     const { logText, imagePreviewUrl } = req.body;
-    const adminId = req.user.id; 
+    const adminId = req.user.id;
     const adminDisplayName = req.user.displayName;
     const organizationId = req.user.organizationId;
 
-    if (!organizationId) {
-      return res.status(403).json({ success: false, message: "Organization context missing for admin." });
-    }
-    if (!logText) {
-      return res.status(400).json({ success: false, message: "Log text is required." });
+    if (!logText && !imagePreviewUrl) { // Allow image-only logs
+      return res.status(400).json({ success: false, message: "Log text or image is required." });
     }
 
     const newLog = new AdminLog({
       adminId,
       adminDisplayName,
-      logText,
+      logText: logText || `Image uploaded by ${adminDisplayName}`,
       imagePreviewUrl,
       organizationId
     });
@@ -35,12 +32,9 @@ router.post('/', [verifyToken, isAdmin], async (req, res) => {
   }
 });
 
-// Get all admin logs (Admin only, sorted by most recent, scoped to organization)
+// Get all admin logs (Admin only, scoped to their organization, sorted by most recent)
 router.get('/', [verifyToken, isAdmin], async (req, res) => {
   try {
-    if (!req.user.organizationId) {
-      return res.status(403).json({ success: false, message: "Organization context missing for admin." });
-    }
     const logs = await AdminLog.find({ organizationId: req.user.organizationId }).sort({ timestamp: -1 });
     res.json(logs.map(log => log.toJSON()));
   } catch (err) {

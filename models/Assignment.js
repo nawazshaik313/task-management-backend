@@ -13,18 +13,17 @@ const assignmentStatusEnum = [
 const assignmentSchema = new mongoose.Schema({
   taskId: { type: mongoose.Schema.Types.ObjectId, ref: 'Task', required: true },
   personId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  taskTitle: { type: String, required: true, trim: true }, // Denormalized for convenience
-  personName: { type: String, required: true, trim: true }, // Denormalized for convenience
+  taskTitle: { type: String, required: true, trim: true }, 
+  personName: { type: String, required: true, trim: true }, 
   justification: { type: String, trim: true },
   status: { type: String, enum: assignmentStatusEnum, required: true, default: 'pending_acceptance' },
-  deadline: { type: Date }, // Specific deadline for this assignment instance
+  deadline: { type: Date }, 
   userSubmissionDate: { type: Date },
   userDelayReason: { type: String, trim: true },
-  organizationId: { type: String, required: true, trim: true },
+  organizationId: { type: String, required: true, index: true }, // Added organizationId
   createdAt: { type: Date, default: Date.now }
 });
 
-// Compound index to prevent duplicate assignments of the same task to the same person within an organization
 assignmentSchema.index({ taskId: 1, personId: 1, organizationId: 1 }, { unique: true });
 
 assignmentSchema.set('toJSON', {

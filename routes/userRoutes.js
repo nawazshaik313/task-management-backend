@@ -1,83 +1,132 @@
 
 const express = require('express');
 const router = express.Router();
+const mongoose = require('mongoose'); // For ObjectId generation
 const User = require('../models/User');
+const PendingUser = require('../models/PendingUser'); // For general registration pending flow
 const jwt = require('jsonwebtoken');
-const { verifyToken, isAdmin } = require('../middleware/auth'); // Correct path to middleware
-const mongoose = require('mongoose'); // For generating ObjectId
+const { verifyToken, isAdmin } = require('../middleware/auth');
+const emailService = require('../utils/emailService');
 
 // User Registration
 router.post('/register', async (req, res) => {
-  const { email, uniqueId, password, displayName, role, position, userInterests, phone, notificationPreference, referringAdminId, organizationName /* For UI, not directly for org ID logic */ } = req.body;
+  const { email, uniqueId, password, displayName, role, position, userInterests, phone, notificationPreference, referringAdminId, organizationName } = req.body;
 
   if (!email || !uniqueId || !password || !displayName) {
     return res.status(400).json({ success: false, message: 'Email, Unique ID, Password, and Display Name are required.' });
   }
 
   try {
-    let existingUser = await User.findOne({ $or: [{ email: email.toLowerCase() }, { uniqueId }] });
-    if (existingUser) {
-      // Check if the existing user is within the same potential organization context if applicable
-      // For now, global uniqueness for email/uniqueId is simpler to maintain initially.
-      return res.status(400).json({ success: false, message: 'User with this email or unique ID already exists globally.' });
-    }
-
     let finalRole = role || 'user';
     let organizationIdToSet;
-    let isNewOrganization = false;
+    let newAdminSiteName = ''; // For email
 
     if (finalRole === 'admin') {
-      // A new admin registration implies creating a new organization/site.
-      // The organizationId will be this new admin's own userId.
-      organizationIdToSet = new mongoose.Types.ObjectId().toString(); // Placeholder, will be replaced by newUser.id
-      isNewOrganization = true;
-    } else if (referringAdminId) {
-      // User is being registered via referral or by an existing admin.
-      // They should inherit the referring admin's organizationId.
-      const referrer = await User.findById(referringAdminId);
-      if (!referrer || !referrer.organizationId) {
-        return res.status(400).json({ success: false, message: 'Referring admin not found or has no organization.' });
+      if (!organizationName) {
+        return res.status(400).json({ success: false, message: 'Organization Name is required for admin registration.' });
       }
-      organizationIdToSet = referrer.organizationId;
-    } else {
-      // General user registration without a referrer - this flow needs careful consideration in multi-tenancy.
-      // For now, disallow general user registration without an organization context.
-      // Or, have a default organization, or require an organization selection.
-      // To keep it simple: assume users are either admins creating their own org, or referred into one.
-      return res.status(400).json({ success: false, message: 'User registration requires an organizational context (e.g., referral or admin setup).' });
+      const existingAdminForOrgName = await User.findOne({ role: 'admin', organizationId: organizationName.toLowerCase().replace(/\s+/g, '-') });
+      if (existingAdminForOrgName) {
+         // This check is a bit simplistic, a true org name check would be better.
+         // For now, let's assume org name is a proxy for org ID uniqueness for first admin.
+      }
+      organizationIdToSet = new mongoose.Types.ObjectId().toString(); // Generate unique Org ID
+      newAdminSiteName = organizationName;
+
+      // Ensure no user (admin or otherwise) already exists with this email or uniqueId system-wide if it's a new admin
+      // This is a global check for admins because they create new orgs.
+       let existingUserGlobal = await User.findOne({ $or: [{ email: email.toLowerCase() }, { uniqueId }] });
+       if (existingUserGlobal) {
+         return res.status(400).json({ success: false, message: 'User with this email or unique ID already exists globally. Cannot register new admin.' });
+       }
+
+    } else { // Role is 'user'
+      if (req.body.organizationId) { // Admin creating user directly
+          organizationIdToSet = req.body.organizationId;
+          const orgAdmin = await User.findOne({_id: referringAdminId, organizationId: organizationIdToSet, role: 'admin'});
+          if (!orgAdmin) return res.status(400).json({success: false, message: "Referring admin does not belong to the specified organization or is not an admin."});
+      } else if (referringAdminId) { // User pre-registration via link
+          // This path is usually handled by /pending-users route for pre-reg.
+          // If direct registration to User model for users happens, it must have referringAdminId.
+          const refAdmin = await User.findById(referringAdminId);
+          if (!refAdmin || !refAdmin.organizationId) {
+              return res.status(400).json({ success: false, message: 'Referring admin not found or has no organization.' });
+          }
+          organizationIdToSet = refAdmin.organizationId;
+      } else {
+         // General public registration for 'user' role without referral creates a PendingUser
+         const existingUser = await User.findOne({ $or: [{ email: email.toLowerCase() }, { uniqueId }] });
+         if (existingUser) {
+           return res.status(409).json({ success: false, message: 'Email or Unique ID already registered as an active user.' });
+         }
+         const existingPendingUser = await PendingUser.findOne({ $or: [{ email: email.toLowerCase() }, { uniqueId }]});
+         if (existingPendingUser) {
+           return res.status(409).json({ success: false, message: 'Email or Unique ID already pending approval.' });
+         }
+
+         const newPendingPublicUser = new PendingUser({
+            displayName, email, password, role: 'user', uniqueId,
+            // No organizationId or referringAdminId yet, needs assignment by a super-admin or specific org admin.
+            // This requires a separate flow for assigning org to these pending users.
+            // For now, we'll mark it as needing system admin attention.
+            organizationId: "NEEDS_ASSIGNMENT_BY_SYSTEM_ADMIN"
+         });
+         await newPendingPublicUser.save();
+         
+         // Notify user their registration is pending
+         emailService.sendRegistrationPendingToUserEmail(email, displayName)
+            .catch(err => console.error("EmailJS Error (sendRegistrationPendingToUserEmail):", err));
+
+         // Notify a system admin (if configured)
+         if (process.env.SYSTEM_ADMIN_EMAIL) {
+             emailService.sendNewPendingRegistrationToAdminEmail(process.env.SYSTEM_ADMIN_EMAIL, "System Admin", displayName, email, "NEEDS_ASSIGNMENT_BY_SYSTEM_ADMIN")
+                .catch(err => console.error("EmailJS Error (sendNewPendingRegistrationToAdminEmail to system admin):", err));
+         }
+         
+         return res.status(201).json({ success: true, message: 'Registration submitted. It is pending administrator review and assignment to an organization.', user: { displayName, email, role: 'user' } });
+      }
     }
+    
+    if (!organizationIdToSet) { // Should not happen if logic above is correct
+        return res.status(400).json({ success: false, message: 'Organization ID could not be determined for the user.' });
+    }
+
+    // Check for existing user within the determined organization
+    const existingUserInOrg = await User.findOne({ $or: [{ email: email.toLowerCase() }, { uniqueId }], organizationId: organizationIdToSet });
+    if (existingUserInOrg) {
+      return res.status(400).json({ success: false, message: 'User with this email or unique ID already exists in this organization.' });
+    }
+    // Also check pending users for that organization
+     const existingPendingInOrg = await PendingUser.findOne({ $or: [{ email: email.toLowerCase() }, { uniqueId }], organizationId: organizationIdToSet });
+     if (existingPendingInOrg) {
+        return res.status(400).json({ success: false, message: 'An account with this email or unique ID is already pending approval for this organization.' });
+     }
+
 
     const newUser = new User({
-      email,
-      uniqueId,
-      password, // Password will be hashed by pre-save hook in model
-      displayName,
+      email, uniqueId, password, displayName,
       role: finalRole,
-      position,
-      userInterests,
-      phone,
-      notificationPreference,
-      referringAdminId: finalRole === 'user' ? referringAdminId : null, // Only relevant for users under an admin
-      organizationId: isNewOrganization ? "" : organizationIdToSet // Temporary for new admin, will update post-save
+      position: position || (finalRole === 'admin' ? 'Administrator' : 'User'),
+      userInterests, phone, notificationPreference,
+      referringAdminId: finalRole === 'user' ? referringAdminId : null,
+      organizationId: organizationIdToSet
     });
 
-    if (isNewOrganization) {
-        newUser.organizationId = newUser.id; // New admin's ID becomes their organization ID
-    }
-    
     await newUser.save();
-    
+
+    emailService.sendWelcomeRegistrationEmail(newUser.email, newUser.displayName, newUser.role, newAdminSiteName)
+      .catch(err => console.error("EmailJS Error (sendWelcomeRegistrationEmail):", err));
+      
     res.status(201).json({ success: true, message: 'User registered successfully.', user: newUser.toJSON() });
 
   } catch (error) {
     console.error("User registration error:", error);
-    if (error.code === 11000) { 
-        return res.status(400).json({ success: false, message: 'Email or Unique ID already exists.' });
+    if (error.code === 11000) { // Mongoose duplicate key error
+        return res.status(400).json({ success: false, message: 'Email or Unique ID already exists (unique constraint violation).' });
     }
     res.status(500).json({ success: false, message: 'Server error during registration.', error: error.message });
   }
 });
-
 
 // User Login
 router.post('/login', async (req, res) => {
@@ -98,16 +147,16 @@ router.post('/login', async (req, res) => {
 
     if (!process.env.JWT_SECRET) {
         console.error("FATAL ERROR: JWT_SECRET environment variable is not defined.");
-        return res.status(500).json({ success: false, message: 'Server configuration error. Please contact administrator.' });
+        return res.status(500).json({ success: false, message: 'Server configuration error.' });
     }
 
     const tokenPayload = {
-      id: user.id, 
+      id: user.id,
       email: user.email,
       role: user.role,
       displayName: user.displayName,
       uniqueId: user.uniqueId,
-      organizationId: user.organizationId // Include organizationId in token
+      organizationId: user.organizationId
     };
     const token = jwt.sign(tokenPayload, process.env.JWT_SECRET, { expiresIn: '2h' });
 
@@ -115,30 +164,38 @@ router.post('/login', async (req, res) => {
       success: true,
       message: 'Login successful.',
       token,
-      user: tokenPayload // Send user details including organizationId
+      user: {
+        id: user.id,
+        email: user.email,
+        displayName: user.displayName,
+        role: user.role,
+        uniqueId: user.uniqueId,
+        organizationId: user.organizationId,
+        position: user.position,
+        userInterests: user.userInterests,
+        phone: user.phone,
+        notificationPreference: user.notificationPreference
+      }
     });
   } catch (error) {
-    console.error("Login error:", error); 
+    console.error("Login error:", error);
     res.status(500).json({ success: false, message: 'Server error during login.' });
   }
 });
 
-// User Logout (Conceptual - JWTs are managed client-side)
 router.post('/logout', (req, res) => {
   res.json({ success: true, message: 'Logged out successfully (client-side action required).' });
 });
 
-// Get Current Logged-in User
 router.get('/current', verifyToken, async (req, res) => {
   try {
-    // req.user from token already has id, role, organizationId etc.
-    // Fetch from DB to get latest full profile, excluding password
-    const user = await User.findById(req.user.id).select('-password'); 
+    const user = await User.findById(req.user.id).select('-password');
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found.' });
     }
-    // Ensure the organizationId from DB matches token, or send what's in DB.
-    // For consistency, user.toJSON() will use the DB version.
+     if (user.organizationId !== req.user.organizationId) {
+      return res.status(403).json({ success: false, message: 'Token organization does not match user record.' });
+    }
     res.json(user.toJSON());
   } catch (error) {
     console.error("Get current user error:", error);
@@ -149,9 +206,6 @@ router.get('/current', verifyToken, async (req, res) => {
 // Get all users (Admin only, scoped to their organization)
 router.get('/', [verifyToken, isAdmin], async (req, res) => {
   try {
-    if (!req.user.organizationId) {
-        return res.status(403).json({ success: false, message: 'Organization context missing for admin.' });
-    }
     const users = await User.find({ organizationId: req.user.organizationId }).select('-password');
     res.json(users.map(u => u.toJSON()));
   } catch (error) {
@@ -159,37 +213,27 @@ router.get('/', [verifyToken, isAdmin], async (req, res) => {
   }
 });
 
-// This endpoint is problematic in multi-tenant. Each org has its own admin state.
-// Removing for now, as "global admin status" doesn't fit.
-// Client-side logic for "first admin" hints would need to be re-evaluated.
-/*
 router.get('/all-for-status-check', async (req, res) => {
   try {
-    // This needs to be rethought for multi-tenancy.
-    // Perhaps it checks if ANY admin exists in ANY org, or a specific org.
-    // For now, returning an empty array or an error might be safest.
-    res.status(501).json({ success: false, message: 'Endpoint under review for multi-tenancy compatibility.' });
+    const adminCount = await User.countDocuments({ role: 'admin' });
+    res.json({ adminExists: adminCount > 0 });
   } catch (error) {
-    console.error("Error fetching users for status check:", error);
-    res.status(500).json({ success: false, message: 'Server error while checking user status.' });
+    console.error("Error fetching admin status:", error);
+    res.status(500).json({ success: false, message: 'Server error while checking admin status.' });
   }
 });
-*/
 
-
-// Get user by ID (Protected, scoped to organization)
 router.get('/:id', verifyToken, async (req, res) => {
   try {
-    if (!req.user.organizationId) {
-        return res.status(403).json({ success: false, message: 'Organization context missing.' });
-    }
-    const user = await User.findOne({ _id: req.params.id, organizationId: req.user.organizationId }).select('-password');
+    const user = await User.findById(req.params.id).select('-password');
     if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found in your organization.' });
+      return res.status(404).json({ success: false, message: 'User not found.' });
     }
-     // Admin can view any user in their org. Non-admin can only view their own.
-    if (req.user.role !== 'admin' && req.user.id !== req.params.id) {
-        return res.status(403).json({ success: false, message: 'Forbidden: You can only view your own profile.' });
+    if (user.id !== req.user.id && req.user.role !== 'admin') {
+        return res.status(403).json({ success: false, message: 'Forbidden.' });
+    }
+    if (user.organizationId !== req.user.organizationId) {
+        return res.status(403).json({ success: false, message: 'Forbidden: User not in your organization.' });
     }
     res.json(user.toJSON());
   } catch (error) {
@@ -197,42 +241,34 @@ router.get('/:id', verifyToken, async (req, res) => {
   }
 });
 
-// Update user by ID (Protected, scoped to organization)
 router.put('/:id', verifyToken, async (req, res) => {
   const { email, uniqueId, displayName, position, userInterests, phone, notificationPreference, role, password } = req.body;
   const userIdToUpdate = req.params.id;
 
-  if (!req.user.organizationId) {
-    return res.status(403).json({ success: false, message: 'Organization context missing.' });
-  }
-  // User can update their own profile. Admin can update any user in their org.
   if (req.user.id !== userIdToUpdate && req.user.role !== 'admin') {
-    return res.status(403).json({ success: false, message: 'Forbidden: Insufficient permissions.' });
+    return res.status(403).json({ success: false, message: 'Forbidden: You can only update your own profile or an admin can update any profile.' });
   }
 
   try {
-    const user = await User.findOne({ _id: userIdToUpdate, organizationId: req.user.organizationId });
+    const user = await User.findById(userIdToUpdate);
     if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found in your organization.' });
+      return res.status(404).json({ success: false, message: 'User not found.' });
+    }
+    if (user.organizationId !== req.user.organizationId) {
+        return res.status(403).json({ success: false, message: 'Forbidden: Cannot modify users outside your organization.' });
     }
 
-    // Prevent non-admins from updating other users in the same org, even if they somehow bypass client checks
-    if (req.user.role !== 'admin' && req.user.id !== user.id.toString()) {
-        return res.status(403).json({ success: false, message: 'Forbidden: You can only update your own profile.' });
-    }
-
-
-    if (email && email.toLowerCase() !== user.email) { 
-        const existingByEmail = await User.findOne({ email: email.toLowerCase(), organizationId: req.user.organizationId });
+    if (email && email.toLowerCase() !== user.email) {
+        const existingByEmail = await User.findOne({ email: email.toLowerCase(), organizationId: user.organizationId });
         if (existingByEmail && existingByEmail.id !== userIdToUpdate) {
-            return res.status(400).json({ success: false, message: 'Email already in use within your organization.' });
+            return res.status(400).json({ success: false, message: 'Email already in use within organization.' });
         }
         user.email = email.toLowerCase();
     }
     if (uniqueId && uniqueId !== user.uniqueId) {
-        const existingByUniqueId = await User.findOne({ uniqueId, organizationId: req.user.organizationId });
+        const existingByUniqueId = await User.findOne({ uniqueId, organizationId: user.organizationId });
         if (existingByUniqueId && existingByUniqueId.id !== userIdToUpdate) {
-            return res.status(400).json({ success: false, message: 'Unique ID already in use within your organization.' });
+            return res.status(400).json({ success: false, message: 'Unique ID already in use within organization.' });
         }
         user.uniqueId = uniqueId;
     }
@@ -243,55 +279,54 @@ router.put('/:id', verifyToken, async (req, res) => {
     if (phone !== undefined) user.phone = phone;
     if (notificationPreference) user.notificationPreference = notificationPreference;
     
-    if (req.user.role === 'admin' && role) {
-        if (role === 'user' && user.role === 'admin') {
-            const adminCountInOrg = await User.countDocuments({ role: 'admin', organizationId: req.user.organizationId });
-            if (adminCountInOrg <= 1 && user.id === userIdToUpdate) { 
-                return res.status(400).json({ success: false, message: 'The sole administrator of this organization cannot be demoted.' });
+    if (req.user.role === 'admin' && role && user.id !== req.user.id) { 
+        if (user.role === 'admin' && role === 'user') { 
+            const adminCountInOrg = await User.countDocuments({ role: 'admin', organizationId: user.organizationId });
+            if (adminCountInOrg <= 1) {
+                return res.status(400).json({ success: false, message: 'Cannot demote the sole administrator of the organization.' });
             }
         }
         user.role = role;
-    } else if (role && user.role !== role && req.user.id === userIdToUpdate) {
-        return res.status(403).json({ success: false, message: 'Role modification not permitted for your own account here.' });
+    } else if (role && user.role !== role) {
+         return res.status(403).json({ success: false, message: 'Role modification not permitted for yourself or by non-admins for others.' });
     }
 
-    if (password) { 
-      user.password = password; 
+    if (password) {
+      user.password = password; // Pre-save hook will hash
     }
 
     const updatedUser = await user.save();
     res.json({ success: true, message: 'User updated successfully.', user: updatedUser.toJSON() });
   } catch (error) {
     console.error("Update user error:", error);
-    if (error.code === 11000) { 
-        return res.status(400).json({ success: false, message: 'Email or Unique ID already exists within the organization.' });
+    if (error.code === 11000) {
+        return res.status(400).json({ success: false, message: 'Email or Unique ID already exists.' });
     }
     res.status(500).json({ success: false, message: 'Server error while updating user.', error: error.message });
   }
 });
 
-// Delete user by ID (Admin only, scoped to organization)
 router.delete('/:id', [verifyToken, isAdmin], async (req, res) => {
   try {
-    if (!req.user.organizationId) {
-        return res.status(403).json({ success: false, message: 'Organization context missing for admin.' });
-    }
-    const userToDelete = await User.findOne({ _id: req.params.id, organizationId: req.user.organizationId });
+    const userToDelete = await User.findById(req.params.id);
     if (!userToDelete) {
-      return res.status(404).json({ success: false, message: 'User not found in your organization.' });
+      return res.status(404).json({ success: false, message: 'User not found.' });
+    }
+    if (userToDelete.organizationId !== req.user.organizationId) {
+        return res.status(403).json({ success: false, message: 'Forbidden: Cannot delete users outside your organization.' });
     }
     if (req.user.id === req.params.id) {
-        return res.status(400).json({ success: false, message: "Admins cannot delete their own account." });
+        return res.status(400).json({ success: false, message: "Admins cannot delete their own account via this route." });
     }
     if (userToDelete.role === 'admin') {
-        const adminCountInOrg = await User.countDocuments({ role: 'admin', organizationId: req.user.organizationId });
+        const adminCountInOrg = await User.countDocuments({ role: 'admin', organizationId: userToDelete.organizationId });
         if (adminCountInOrg <= 1) {
-            return res.status(400).json({ success: false, message: "Cannot delete the sole administrator of this organization." });
+            return res.status(400).json({ success: false, message: "Cannot delete the sole administrator of the organization." });
         }
     }
     
-    await User.deleteOne({ _id: req.params.id, organizationId: req.user.organizationId });
-    // TODO: Consider deleting related assignments or other user-specific data from this organization.
+    await User.findByIdAndDelete(req.params.id);
+    // TODO: Cascade delete assignments, etc.
     res.json({ success: true, message: 'User deleted successfully.' });
   } catch (error) {
     console.error("Delete user error:", error);
@@ -299,37 +334,34 @@ router.delete('/:id', [verifyToken, isAdmin], async (req, res) => {
   }
 });
 
-
-// Forgot Password Request (scoped to organization if possible, or global for simplicity)
 router.post('/forgot-password', async (req, res) => {
     const { email } = req.body;
-    // For multi-tenancy, you might require an organization identifier here too,
-    // or assume email is globally unique for password reset.
-    // Simpler: assume email is the primary lookup.
     if (!email) {
         return res.status(400).json({ success: false, message: 'Email is required.' });
     }
     try {
         const user = await User.findOne({ email: email.toLowerCase() });
-        if (!user) {
-            // Standard practice: don't reveal if email exists or not for security.
+        if (!user) { // Don't reveal if user exists for security
             return res.status(200).json({ success: true, message: 'If an account with that email exists, a password reset link has been sent.' });
         }
         
-        if (!process.env.JWT_SECRET) {
-            console.error("FATAL ERROR: JWT_SECRET for password reset is not defined.");
+        if (!process.env.JWT_SECRET || !process.env.FRONTEND_URL) {
+            console.error("FATAL ERROR: JWT_SECRET or FRONTEND_URL for password reset is not defined.");
             return res.status(500).json({ success: false, message: 'Server configuration error for password reset.' });
         }
-
-        // Token includes user ID and org ID for context if needed in reset form.
         const resetToken = jwt.sign(
-            { id: user.id, organizationId: user.organizationId, type: 'password_reset' }, 
+            { id: user.id, type: 'password_reset', organizationId: user.organizationId }, 
             process.env.JWT_SECRET, 
             { expiresIn: '15m' }
         ); 
         
-        console.log(`Password reset requested for ${email} in org ${user.organizationId}. Token: ${resetToken}. Link should be: /reset-password?token=${resetToken}`);
-        // Here you would send an email with the reset link.
+        // Construct reset link. Actual reset page path on frontend needs to be defined.
+        // Example: /reset-password?token=<token>
+        // Frontend should have a page that handles this hash: `#PasswordReset?token=XYZ`
+        const resetLink = `${process.env.FRONTEND_URL}#PasswordReset?token=${resetToken}`;
+        
+        emailService.sendPasswordResetEmail(user.email, user.displayName, resetLink)
+          .catch(err => console.error("EmailJS Error (sendPasswordResetEmail):", err));
 
         res.status(200).json({ success: true, message: 'If an account with that email exists, a password reset link has been sent.' });
     } catch (error) {
@@ -338,40 +370,39 @@ router.post('/forgot-password', async (req, res) => {
     }
 });
 
-
-// Reset Password (requires token from forgot password flow)
+// The actual password reset will be a new page/component on the frontend.
+// That page will take the token from URL, new password, and call this endpoint.
 router.post('/reset-password', async (req, res) => {
     const { token, newPassword } = req.body;
     if (!token || !newPassword) {
         return res.status(400).json({ success: false, message: 'Token and new password are required.' });
     }
-
     try {
         if (!process.env.JWT_SECRET) {
             console.error("FATAL ERROR: JWT_SECRET for password reset verification is not defined.");
-            return res.status(500).json({ success: false, message: 'Server configuration error for password reset.' });
+            return res.status(500).json({ success: false, message: 'Server configuration error.' });
         }
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
         if (decoded.type !== 'password_reset' || !decoded.id || !decoded.organizationId) {
-             return res.status(400).json({ success: false, message: 'Invalid or malformed reset token.' });
+             return res.status(400).json({ success: false, message: 'Invalid token type or payload.' });
         }
-
-        // Find user by ID AND organizationId to ensure context.
         const user = await User.findOne({ _id: decoded.id, organizationId: decoded.organizationId });
-
         if (!user) {
             return res.status(400).json({ success: false, message: 'Invalid or expired reset token (user not found or org mismatch).' });
         }
-
-        user.password = newPassword; 
+        user.password = newPassword; // Pre-save hook will hash
         await user.save();
-
         res.json({ success: true, message: 'Password has been reset successfully.' });
-    } catch (error) { 
+    } catch (error) {
         console.error("Reset password error:", error);
-        res.status(400).json({ success: false, message: 'Invalid or expired reset token, or server error.' });
+        if (error.name === 'TokenExpiredError') {
+             return res.status(400).json({ success: false, message: 'Password reset token has expired.' });
+        }
+        if (error.name === 'JsonWebTokenError') {
+             return res.status(400).json({ success: false, message: 'Invalid password reset token.' });
+        }
+        res.status(500).json({ success: false, message: 'Server error during password reset.' });
     }
 });
-
 
 module.exports = router;

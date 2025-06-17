@@ -2,39 +2,39 @@
 const express = require("express");
 const router = express.Router();
 const Program = require("../models/Program");
-const Task = require("../models/Task"); 
+const Task = require("../models/Task");
 const { verifyToken, isAdmin } = require('../middleware/auth');
 
-// Create a new program (Admin only, scoped to organization)
+// Create a new program (Admin only, scoped to their organization)
 router.post("/", [verifyToken, isAdmin], async (req, res) => {
   try {
     const { name, description } = req.body;
     const organizationId = req.user.organizationId;
 
-    if (!organizationId) {
-        return res.status(403).json({ success: false, message: "Organization context missing for admin." });
-    }
     if (!name || !description) {
       return res.status(400).json({ success: false, message: "Program name and description are required." });
     }
+    // Check if program name already exists for this organization
+    const existingProgram = await Program.findOne({ name, organizationId });
+    if (existingProgram) {
+        return res.status(400).json({ success: false, message: 'Program name already exists in your organization.' });
+    }
+
     const newProgram = new Program({ name, description, organizationId });
     const savedProgram = await newProgram.save();
     res.status(201).json(savedProgram.toJSON());
   } catch (err) {
     console.error("Error creating program:", err);
-    if (err.code === 11000) { // Handles unique index {name, organizationId}
-        return res.status(400).json({ success: false, message: 'Program name already exists within your organization.' });
+    if (err.code === 11000) { // Should be caught by pre-check now
+        return res.status(400).json({ success: false, message: 'Program name already exists in your organization (concurrent request?).' });
     }
     res.status(500).json({ success: false, message: "Server error while creating program.", error: err.message });
   }
 });
 
-// Get all programs (Protected, scoped to organization)
+// Get all programs (Protected, scoped to user's organization)
 router.get("/", verifyToken, async (req, res) => {
   try {
-     if (!req.user.organizationId) {
-        return res.status(403).json({ success: false, message: "Organization context missing." });
-    }
     const programs = await Program.find({ organizationId: req.user.organizationId }).sort({ name: 1 });
     res.json(programs.map(program => program.toJSON()));
   } catch (err) {
@@ -43,12 +43,9 @@ router.get("/", verifyToken, async (req, res) => {
   }
 });
 
-// Get a specific program by ID (Protected, scoped to organization)
+// Get a specific program by ID (Protected, scoped)
 router.get("/:id", verifyToken, async (req, res) => {
   try {
-    if (!req.user.organizationId) {
-        return res.status(403).json({ success: false, message: "Organization context missing." });
-    }
     const program = await Program.findOne({ _id: req.params.id, organizationId: req.user.organizationId });
     if (!program) {
       return res.status(404).json({ success: false, message: "Program not found in your organization." });
@@ -60,50 +57,51 @@ router.get("/:id", verifyToken, async (req, res) => {
   }
 });
 
-// Update a program (Admin only, scoped to organization)
+// Update a program (Admin only, scoped)
 router.put("/:id", [verifyToken, isAdmin], async (req, res) => {
   try {
     const { name, description } = req.body;
     const organizationId = req.user.organizationId;
-     if (!organizationId) {
-        return res.status(403).json({ success: false, message: "Organization context missing for admin." });
+
+    const programToUpdate = await Program.findOne({ _id: req.params.id, organizationId });
+    if (!programToUpdate) {
+        return res.status(404).json({ success: false, message: "Program not found in your organization." });
     }
 
-    const updatedProgram = await Program.findOneAndUpdate(
-      { _id: req.params.id, organizationId },
-      { name, description, organizationId }, // ensure orgId is part of update if needed, though query scopes it
+    if (name && name !== programToUpdate.name) {
+        const existingProgram = await Program.findOne({ name, organizationId });
+        if (existingProgram) {
+            return res.status(400).json({ success: false, message: 'Another program with this name already exists in your organization.' });
+        }
+    }
+
+    const updatedProgram = await Program.findByIdAndUpdate(
+      req.params.id,
+      { name, description }, // organizationId does not change
       { new: true, runValidators: true }
     );
-    if (!updatedProgram) {
-      return res.status(404).json({ success: false, message: "Program not found in your organization." });
-    }
-    // If program name changed, update tasks linked to this program within the same organization
-    if (name) {
+    
+    if (name && name !== programToUpdate.name) { // If name changed
         await Task.updateMany({ programId: updatedProgram.id, organizationId }, { programName: name });
     }
     res.json(updatedProgram.toJSON());
   } catch (err) {
     console.error("Error updating program:", err);
-     if (err.code === 11000) {
-        return res.status(400).json({ success: false, message: 'Program name already exists within your organization.' });
+     if (err.code === 11000) { // Should be caught by pre-check
+        return res.status(400).json({ success: false, message: 'Program name already exists in your organization (concurrent request?).' });
     }
     res.status(500).json({ success: false, message: "Server error while updating program.", error: err.message });
   }
 });
 
-// Delete a program (Admin only, scoped to organization)
+// Delete a program (Admin only, scoped)
 router.delete("/:id", [verifyToken, isAdmin], async (req, res) => {
   try {
-    const organizationId = req.user.organizationId;
-    if (!organizationId) {
-        return res.status(403).json({ success: false, message: "Organization context missing for admin." });
-    }
-    const program = await Program.findOneAndDelete({ _id: req.params.id, organizationId });
+    const program = await Program.findOneAndDelete({ _id: req.params.id, organizationId: req.user.organizationId });
     if (!program) {
       return res.status(404).json({ success: false, message: "Program not found in your organization." });
     }
-    // Set programId to null for tasks associated with this program within the same organization
-    await Task.updateMany({ programId: req.params.id, organizationId }, { $set: { programId: null, programName: null } });
+    await Task.updateMany({ programId: req.params.id, organizationId: req.user.organizationId }, { $set: { programId: null, programName: null } });
     res.json({ success: true, message: "Program deleted and associated tasks updated." });
   } catch (err) {
     console.error("Error deleting program:", err);
