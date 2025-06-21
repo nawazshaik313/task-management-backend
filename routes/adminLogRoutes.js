@@ -25,7 +25,6 @@ router.post('/', [verifyToken, isAdmin], async (req, res) => {
     });
 
     const savedLog = await newLog.save();
-    console.log(`[AdminLog POST] Log saved for org ${organizationId}: ID ${savedLog.id}, Admin: ${adminDisplayName}, Text: ${(savedLog.logText || '').substring(0, 50)}`);
     res.status(201).json(savedLog.toJSON());
   } catch (err) {
     console.error("Error creating admin log:", err);
@@ -36,10 +35,7 @@ router.post('/', [verifyToken, isAdmin], async (req, res) => {
 // Get all admin logs (Admin only, scoped to their organization, sorted by most recent)
 router.get('/', [verifyToken, isAdmin], async (req, res) => {
   try {
-    const orgId = req.user.organizationId;
-    console.log(`[AdminLog GET] Fetching logs for admin ${req.user.displayName} (Org: ${orgId})`);
-    const logs = await AdminLog.find({ organizationId: orgId }).sort({ timestamp: -1 });
-    console.log(`[AdminLog GET] Found ${logs.length} logs for Org: ${orgId}`);
+    const logs = await AdminLog.find({ organizationId: req.user.organizationId }).sort({ timestamp: -1 });
     res.json(logs.map(log => log.toJSON()));
   } catch (err) {
     console.error("Error fetching admin logs:", err);

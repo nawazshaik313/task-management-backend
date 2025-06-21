@@ -29,9 +29,7 @@ const taskRoutes = require('./routes/taskRoutes');
 const programRoutes = require('./routes/programRoutes');
 const assignmentRoutes = require('./routes/assignmentRoutes');
 const adminLogRoutes = require('./routes/adminLogRoutes');
-// Import currentUserRoutes if still needed, though its functionality might be covered by /users/current
-// const currentUserRoutes = require('./routes/currentUserRoutes');
-
+// const currentUserRoutes = require('./routes/currentUserRoutes'); // This was problematic and likely not needed
 
 const app = express();
 
@@ -54,7 +52,7 @@ app.use('/tasks', taskRoutes);
 app.use('/programs', programRoutes);
 app.use('/assignments', assignmentRoutes);
 app.use('/admin-logs', adminLogRoutes);
-// app.use('/current-user', currentUserRoutes); // If used
+// app.use('/current-user', currentUserRoutes); // If re-introducing, ensure it's necessary and correct
 
 // Basic Test Route
 app.get('/', (req, res) => {
@@ -64,11 +62,14 @@ app.get('/', (req, res) => {
 // Global Error Handler (optional, for unhandled errors)
 app.use((err, req, res, next) => {
   console.error("Unhandled error:", err.stack);
-  res.status(500).send('Something broke!');
+  res.status(500).json({ success: false, message: 'Something broke on the server!', error: err.message });
 });
 
 // Start Server
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`✅ Server is running on port ${PORT}`);
+  if(process.env.NODE_ENV !== 'production'){
+    console.log(`   Development server accessible at: http://localhost:${PORT}`);
+  }
 });

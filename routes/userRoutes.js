@@ -3,170 +3,83 @@ const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose'); // For ObjectId generation
 const User = require('../models/User');
-const PendingUser = require('../models/PendingUser'); // For general registration pending flow
 const jwt = require('jsonwebtoken');
 const { verifyToken, isAdmin } = require('../middleware/auth');
-const path = require('path');
-const emailService = require(path.join(__dirname, '../utils/emailService.js'));
-
-// New endpoint for validating admin referral ID
-router.get('/validate-admin-ref/:adminId', async (req, res) => {
-  try {
-    const adminId = req.params.adminId;
-    if (!mongoose.Types.ObjectId.isValid(adminId)) {
-      return res.json({ success: true, isValidRef: false, message: 'Invalid admin ID format.' });
-    }
-    const user = await User.findById(adminId);
-    if (user && user.role === 'admin' && user.organizationId) {
-      res.json({ 
-        success: true, 
-        isValidRef: true, 
-        displayName: user.displayName, 
-        organizationId: user.organizationId 
-      });
-    } else {
-      res.json({ success: true, isValidRef: false, message: 'Referring admin not found, is not an admin, or has no organization.' });
-    }
-  } catch (error) {
-    console.error("Error validating admin ref:", error);
-    res.status(500).json({ success: false, message: 'Server error during admin reference validation.' });
-  }
-});
 
 // User Registration
 router.post('/register', async (req, res) => {
-  const { email, uniqueId, password, displayName, role, position, userInterests, phone, notificationPreference, referringAdminId, companyName } = req.body; // Changed organizationName to companyName
+  const { email, uniqueId, password, displayName, role, position, userInterests, phone, notificationPreference, referringAdminId, organizationName } = req.body;
 
   if (!email || !uniqueId || !password || !displayName) {
     return res.status(400).json({ success: false, message: 'Email, Unique ID, Password, and Display Name are required.' });
   }
 
   try {
+    let existingUser = await User.findOne({ $or: [{ email: email.toLowerCase() }, { uniqueId }] });
+    if (existingUser) {
+      return res.status(400).json({ success: false, message: 'User with this email or unique ID already exists.' });
+    }
+
     let finalRole = role || 'user';
     let organizationIdToSet;
-    let newAdminCompanyName = ''; // For email, changed from newAdminSiteName
 
     if (finalRole === 'admin') {
-      if (!companyName) { // Changed organizationName to companyName
-        return res.status(400).json({ success: false, message: 'Company Name is required for admin registration.' });
+      if (!organizationName) {
+        return res.status(400).json({ success: false, message: 'Organization Name is required for admin registration.' });
       }
-      // The organizationId is now a unique ObjectId string, not derived from companyName directly for uniqueness.
-      organizationIdToSet = new mongoose.Types.ObjectId().toString(); // Generate unique Org ID
-      newAdminCompanyName = companyName; // Use companyName for email
-
-      // REMOVED GLOBAL CHECK:
-      // let existingUserGlobal = await User.findOne({ $or: [{ email: email.toLowerCase() }, { uniqueId }] });
-      // if (existingUserGlobal) {
-      //   return res.status(400).json({ success: false, message: 'User with this email or unique ID already exists globally. Cannot register new admin.' });
-      // }
-
+      // For new admin, generate a new organization ID.
+      organizationIdToSet = new mongoose.Types.ObjectId().toString();
+      // Potentially create an Organization record here if you have an Organization model.
+      // For now, the ID is just associated with the admin user.
     } else { // Role is 'user'
-      if (req.body.organizationId) { // Admin creating user directly
+      // For general user registration, organizationId must be provided or derived.
+      // Current frontend public registration for 'user' doesn't provide organizationId or referringAdminId.
+      // This path will likely fail unless frontend is changed or this type of registration is disallowed.
+      // Admins creating users or pre-registration are the primary paths for users to get an orgId.
+      if (req.body.organizationId) { // If admin is creating user and passing orgId directly
           organizationIdToSet = req.body.organizationId;
-          const orgAdmin = await User.findOne({_id: referringAdminId, organizationId: organizationIdToSet, role: 'admin'});
-          if (!orgAdmin) return res.status(400).json({success: false, message: "Referring admin does not belong to the specified organization or is not an admin."});
-      } else if (referringAdminId) { // User pre-registration via link
+      } else if (referringAdminId) {
           const refAdmin = await User.findById(referringAdminId);
           if (!refAdmin || !refAdmin.organizationId) {
               return res.status(400).json({ success: false, message: 'Referring admin not found or has no organization.' });
           }
           organizationIdToSet = refAdmin.organizationId;
       } else {
-         // General public registration for 'user' role without referral creates a PendingUser
-         const existingUser = await User.findOne({ $or: [{ email: email.toLowerCase() }, { uniqueId }] });
-         if (existingUser) {
-           return res.status(409).json({ success: false, message: 'Email or Unique ID already registered as an active user.' });
-         }
-         const existingPendingUser = await PendingUser.findOne({ $or: [{ email: email.toLowerCase() }, { uniqueId }]});
-         if (existingPendingUser) {
-           return res.status(409).json({ success: false, message: 'Email or Unique ID already pending approval.' });
-         }
-
-         const newPendingPublicUser = new PendingUser({
-            displayName, email, password, role: 'user', uniqueId,
-            organizationId: "NEEDS_ASSIGNMENT_BY_SYSTEM_ADMIN"
-         });
-         await newPendingPublicUser.save();
-         
-         emailService.sendRegistrationPendingToUserEmail(email, displayName)
-            .catch(err => console.error("EmailJS Error (sendRegistrationPendingToUserEmail):", err));
-
-         if (process.env.SYSTEM_ADMIN_EMAIL) {
-             emailService.sendNewPendingRegistrationToAdminEmail(process.env.SYSTEM_ADMIN_EMAIL, "System Admin", displayName, email, "NEEDS_ASSIGNMENT_BY_SYSTEM_ADMIN")
-                .catch(err => console.error("EmailJS Error (sendNewPendingRegistrationToAdminEmail to system admin):", err));
-         }
-         
-         return res.status(201).json({ success: true, message: 'Registration submitted. It is pending administrator review and assignment to an organization.', user: { displayName, email, role: 'user' } });
+         // If a general user tries to register without an admin creating them or a referral,
+         // they cannot be assigned to an organization.
+         // This flow needs to be handled: either disallow, or create a pending user without org for later assignment.
+         // For now, making organizationId required on User model means this will fail if not set.
+         return res.status(400).json({ success: false, message: 'User registration requires an organization context (e.g., created by an admin or via referral).' });
       }
     }
     
-    if (!organizationIdToSet) { 
-        console.error("FATAL LOGIC ERROR: organizationIdToSet is undefined at critical point in /users/register. Request body:", req.body);
+    if (!organizationIdToSet) {
         return res.status(400).json({ success: false, message: 'Organization ID could not be determined for the user.' });
     }
 
-    const existingUserInOrg = await User.findOne({ $or: [{ email: email.toLowerCase() }, { uniqueId }], organizationId: organizationIdToSet });
-    if (existingUserInOrg) {
-      return res.status(400).json({ success: false, message: 'User with this email or unique ID already exists in this organization.' });
-    }
-     const existingPendingInOrg = await PendingUser.findOne({ $or: [{ email: email.toLowerCase() }, { uniqueId }], organizationId: organizationIdToSet });
-     if (existingPendingInOrg) {
-        return res.status(400).json({ success: false, message: 'An account with this email or unique ID is already pending approval for this organization.' });
-     }
-
     const newUser = new User({
-      email, uniqueId, password, displayName,
+      email,
+      uniqueId,
+      password,
+      displayName,
       role: finalRole,
-      position: position || (finalRole === 'admin' ? 'Administrator' : 'User'),
-      userInterests, phone, notificationPreference,
+      position,
+      userInterests,
+      phone,
+      notificationPreference,
       referringAdminId: finalRole === 'user' ? referringAdminId : null,
       organizationId: organizationIdToSet
     });
 
     await newUser.save();
-
-    emailService.sendWelcomeRegistrationEmail(newUser.email, newUser.displayName, newUser.role, newAdminCompanyName) // Pass companyName
-      .catch(err => console.error("EmailJS Error (sendWelcomeRegistrationEmail):", err));
-      
     res.status(201).json({ success: true, message: 'User registered successfully.', user: newUser.toJSON() });
 
   } catch (error) {
-    console.error("--- USER REGISTRATION ERROR ---");
-    console.error("Type:", error.name);
-    console.error("Message:", error.message);
-    console.error("Code:", error.code);
-    console.error("Stack Trace:", error.stack);
-    try {
-        console.error("Full Error Object (JSON):", JSON.stringify(error, Object.getOwnPropertyNames(error)));
-    } catch (e) {
-        console.error("Full Error Object (could not stringify):", error);
+    console.error("User registration error:", error);
+    if (error.code === 11000) {
+        return res.status(400).json({ success: false, message: 'Email or Unique ID already exists.' });
     }
-    console.error("--- END USER REGISTRATION ERROR ---");
-
-    if (error.code === 11000) { 
-        return res.status(400).json({ success: false, message: 'Email or Unique ID already exists (unique constraint violation).' });
-    } else if (error.name === 'ValidationError') {
-        let errors = {};
-        for (let field in error.errors) {
-            errors[field] = error.errors[field].message;
-        }
-        return res.status(400).json({ success: false, message: 'Validation failed. Please check the provided data.', errors });
-    }
-    
-    let detailedErrorMessage = `Server error during registration.`;
-    if (error.name) detailedErrorMessage += ` (Type: ${error.name})`;
-    // Avoid duplicating message if name and message are the same
-    if (error.message && error.name !== error.message && !detailedErrorMessage.includes(error.message)) {
-        detailedErrorMessage += ` Details: ${error.message}`;
-    }
-
-
-    res.status(500).json({ 
-        success: false, 
-        message: detailedErrorMessage,
-        errorType: error.name, 
-        errorCode: error.code,
-    });
+    res.status(500).json({ success: false, message: 'Server error during registration.', error: error.message });
   }
 });
 
@@ -198,7 +111,7 @@ router.post('/login', async (req, res) => {
       role: user.role,
       displayName: user.displayName,
       uniqueId: user.uniqueId,
-      organizationId: user.organizationId
+      organizationId: user.organizationId // Include organizationId in token
     };
     const token = jwt.sign(tokenPayload, process.env.JWT_SECRET, { expiresIn: '2h' });
 
@@ -206,7 +119,7 @@ router.post('/login', async (req, res) => {
       success: true,
       message: 'Login successful.',
       token,
-      user: {
+      user: { // Also include organizationId in the user object in response
         id: user.id,
         email: user.email,
         displayName: user.displayName,
@@ -257,6 +170,8 @@ router.get('/', [verifyToken, isAdmin], async (req, res) => {
 
 router.get('/all-for-status-check', async (req, res) => {
   try {
+    // This endpoint should ideally not expose all users.
+    // For "admin exists" check, a count is better.
     const adminCount = await User.countDocuments({ role: 'admin' });
     res.json({ adminExists: adminCount > 0 });
   } catch (error) {
@@ -271,6 +186,7 @@ router.get('/:id', verifyToken, async (req, res) => {
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found.' });
     }
+    // Security: User can only get their own, or admin can get any within their org.
     if (user.id !== req.user.id && req.user.role !== 'admin') {
         return res.status(403).json({ success: false, message: 'Forbidden.' });
     }
@@ -321,8 +237,8 @@ router.put('/:id', verifyToken, async (req, res) => {
     if (phone !== undefined) user.phone = phone;
     if (notificationPreference) user.notificationPreference = notificationPreference;
     
-    if (req.user.role === 'admin' && role && user.id !== req.user.id) { 
-        if (user.role === 'admin' && role === 'user') { 
+    if (req.user.role === 'admin' && role && user.id !== req.user.id) { // Admin changing another user's role
+        if (user.role === 'admin' && role === 'user') { // Demoting an admin
             const adminCountInOrg = await User.countDocuments({ role: 'admin', organizationId: user.organizationId });
             if (adminCountInOrg <= 1) {
                 return res.status(400).json({ success: false, message: 'Cannot demote the sole administrator of the organization.' });
@@ -334,7 +250,7 @@ router.put('/:id', verifyToken, async (req, res) => {
     }
 
     if (password) {
-      user.password = password; // Pre-save hook will hash
+      user.password = password;
     }
 
     const updatedUser = await user.save();
@@ -368,7 +284,8 @@ router.delete('/:id', [verifyToken, isAdmin], async (req, res) => {
     }
     
     await User.findByIdAndDelete(req.params.id);
-    // TODO: Cascade delete assignments, etc.
+    // TODO: Cascade delete assignments, etc. or handle re-assignment.
+    // For now, assignments will be orphaned if not handled by a cleanup task or frontend logic.
     res.json({ success: true, message: 'User deleted successfully.' });
   } catch (error) {
     console.error("Delete user error:", error);
@@ -383,25 +300,16 @@ router.post('/forgot-password', async (req, res) => {
     }
     try {
         const user = await User.findOne({ email: email.toLowerCase() });
-        if (!user) { // Don't reveal if user exists for security
+        if (!user) {
             return res.status(200).json({ success: true, message: 'If an account with that email exists, a password reset link has been sent.' });
         }
         
-        if (!process.env.JWT_SECRET || !process.env.FRONTEND_URL) {
-            console.error("FATAL ERROR: JWT_SECRET or FRONTEND_URL for password reset is not defined.");
-            return res.status(500).json({ success: false, message: 'Server configuration error for password reset.' });
+        if (!process.env.JWT_SECRET) {
+            console.error("FATAL ERROR: JWT_SECRET for password reset is not defined.");
+            return res.status(500).json({ success: false, message: 'Server configuration error.' });
         }
-        const resetToken = jwt.sign(
-            { id: user.id, type: 'password_reset', organizationId: user.organizationId }, 
-            process.env.JWT_SECRET, 
-            { expiresIn: '15m' }
-        ); 
-        
-        const resetLink = `${process.env.FRONTEND_URL || 'about:blank'}#PasswordReset?token=${resetToken}`; // Use about:blank if FRONTEND_URL not set for safety
-        
-        emailService.sendPasswordResetEmail(user.email, user.displayName, resetLink)
-          .catch(err => console.error("EmailJS Error (sendPasswordResetEmail):", err));
-
+        const resetToken = jwt.sign({ id: user.id, type: 'password_reset', organizationId: user.organizationId }, process.env.JWT_SECRET, { expiresIn: '15m' }); 
+        console.log(`Password reset requested for ${email} (Org: ${user.organizationId}). Token: ${resetToken}. Link: /reset-password?token=${resetToken}`);
         res.status(200).json({ success: true, message: 'If an account with that email exists, a password reset link has been sent.' });
     } catch (error) {
         console.error("Forgot password error:", error);
@@ -421,24 +329,18 @@ router.post('/reset-password', async (req, res) => {
         }
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
         if (decoded.type !== 'password_reset' || !decoded.id || !decoded.organizationId) {
-             return res.status(400).json({ success: false, message: 'Invalid token type or payload.' });
+             return res.status(400).json({ success: false, message: 'Invalid token.' });
         }
         const user = await User.findOne({ _id: decoded.id, organizationId: decoded.organizationId });
         if (!user) {
             return res.status(400).json({ success: false, message: 'Invalid or expired reset token (user not found or org mismatch).' });
         }
-        user.password = newPassword; // Pre-save hook will hash
+        user.password = newPassword;
         await user.save();
         res.json({ success: true, message: 'Password has been reset successfully.' });
     } catch (error) {
         console.error("Reset password error:", error);
-        if (error.name === 'TokenExpiredError') {
-             return res.status(400).json({ success: false, message: 'Password reset token has expired.' });
-        }
-        if (error.name === 'JsonWebTokenError') {
-             return res.status(400).json({ success: false, message: 'Invalid password reset token.' });
-        }
-        res.status(500).json({ success: false, message: 'Server error during password reset.' });
+        res.status(400).json({ success: false, message: 'Invalid or expired reset token, or server error.' });
     }
 });
 

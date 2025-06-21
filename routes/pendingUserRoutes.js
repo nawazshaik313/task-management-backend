@@ -4,14 +4,13 @@ const router = express.Router();
 const PendingUser = require('../models/PendingUser');
 const User = require('../models/User');
 const { verifyToken, isAdmin } = require('../middleware/auth');
-const path = require('path');
-const emailService = require(path.join(__dirname, '../utils/emailService.js'));
+const { sendPreRegistrationNotificationToAdminEmail } = require('../utils/emailNotifications'); // Import new util
 
 // Create a new pending user registration (typically from pre-registration link)
 router.post('/', async (req, res) => {
   let { displayName, email, password, role, uniqueId, referringAdminId } = req.body;
 
-  if (!displayName || !email || !password || !uniqueId) { 
+  if (!displayName || !email || !password || !uniqueId) {
     return res.status(400).json({ success: false, error: 'Display Name, Email, Password, and Unique ID are required.' });
   }
   if (!referringAdminId) {
@@ -23,11 +22,9 @@ router.post('/', async (req, res) => {
   try {
     const refAdmin = await User.findById(referringAdminId);
     if (!refAdmin || !refAdmin.organizationId) {
-        console.warn(`[PendingUsers POST] Referring admin ${referringAdminId} not found or has no organization.`);
         return res.status(400).json({ success: false, error: 'Referring administrator not found or has no organization.'});
     }
     const organizationIdToSet = refAdmin.organizationId;
-    console.log(`[PendingUsers POST] Referring admin ${refAdmin.email} (Org: ${organizationIdToSet})`);
 
     const existingUser = await User.findOne({ $or: [{ email: email.toLowerCase() }, { uniqueId }], organizationId: organizationIdToSet });
     if (existingUser) {
@@ -39,32 +36,31 @@ router.post('/', async (req, res) => {
     }
     
     const newPendingUser = new PendingUser({
-      displayName, email, password, role, uniqueId,
+      displayName,
+      email,
+      password, 
+      role,
+      uniqueId,
       referringAdminId,
       organizationId: organizationIdToSet
     });
 
     const savedPendingUser = await newPendingUser.save();
-    console.log(`[PendingUsers POST] Saved pending user ${savedPendingUser.email} (ID: ${savedPendingUser.id}) with Org ID: ${savedPendingUser.organizationId} (Ref Admin: ${referringAdminId})`);
     
-    // Notify user of submission
-    emailService.sendPreRegistrationSubmittedToUserEmail(savedPendingUser.email, savedPendingUser.displayName, refAdmin.displayName)
-        .catch(err => console.error("EmailJS Error (sendPreRegistrationSubmittedToUserEmail):", err));
-
-    // Notify referring admin
-    if (refAdmin.email && refAdmin.notificationPreference === 'email') {
-        emailService.sendPreRegistrationNotificationToAdminEmail(refAdmin.email, refAdmin.displayName, savedPendingUser.displayName, savedPendingUser.uniqueId)
-            .catch(err => console.error("EmailJS Error (sendPreRegistrationNotificationToAdminEmail):", err));
+    // Notify the referring admin
+    if (refAdmin && refAdmin.email && (refAdmin.notificationPreference === 'email' || !refAdmin.notificationPreference)) { // Default to email if preference not set or is email
+        await sendPreRegistrationNotificationToAdminEmail(refAdmin.email, refAdmin.displayName, savedPendingUser.displayName, savedPendingUser.uniqueId, organizationIdToSet);
     }
 
     const responseUser = { ...savedPendingUser.toJSON() };
     delete responseUser.password;
-    res.status(201).json({ success: true, user: responseUser });
 
+    res.status(201).json({ success: true, user: responseUser });
   } catch (err) {
-    console.error("[PendingUsers POST] Error creating pending user:", err);
+    console.error("Error creating pending user:", err);
     if (err.code === 11000) { 
-        return res.status(409).json({ success: false, error: 'Duplicate email or uniqueId for pending user within the organization.' });
+        // With compound indexes, this now correctly means duplicate within the organization.
+        return res.status(409).json({ success: false, error: 'Duplicate email or unique ID for pending user within this organization.' });
     }
     res.status(500).json({ success: false, error: 'Failed to save pending user: ' + err.message });
   }
@@ -73,13 +69,10 @@ router.post('/', async (req, res) => {
 // Get all pending users (Admin only, scoped to their organization)
 router.get('/', [verifyToken, isAdmin], async (req, res) => {
   try {
-    const adminOrgId = req.user.organizationId;
-    console.log(`[PendingUsers GET] Admin ${req.user.email} (Org: ${adminOrgId}) fetching pending users.`);
-    const pendingUsers = await PendingUser.find({ organizationId: adminOrgId }).sort({ submissionDate: -1 });
-    console.log(`[PendingUsers GET] Found ${pendingUsers.length} pending users for Org: ${adminOrgId}.`);
+    const pendingUsers = await PendingUser.find({ organizationId: req.user.organizationId }).sort({ submissionDate: -1 });
     res.json(pendingUsers.map(pu => pu.toJSON())); 
   } catch (err) {
-    console.error("[PendingUsers GET] Error fetching pending users:", err);
+    console.error("Error fetching pending users:", err);
     res.status(500).json({ success: false, error: 'Server error while fetching pending users.' });
   }
 });
@@ -92,12 +85,9 @@ router.delete('/:id', [verifyToken, isAdmin], async (req, res) => {
       return res.status(404).json({ success: false, error: 'Pending user not found in your organization or already processed.' });
     }
     await PendingUser.findByIdAndDelete(req.params.id);
-    console.log(`[PendingUsers DELETE] Admin ${req.user.email} rejected pending user ${pendingUser.email} (ID: ${req.params.id}) from Org: ${req.user.organizationId}`);
-    // Optionally send rejection email to user:
-    // emailService.sendAccountRejectedEmail(pendingUser.email, pendingUser.displayName, req.user.displayName);
     res.json({ success: true, message: 'Pending user rejected and removed successfully.' });
   } catch (err) {
-    console.error("[PendingUsers DELETE] Error deleting pending user:", err);
+    console.error("Error deleting pending user:", err);
     res.status(500).json({ success: false, error: 'Server error while deleting pending user.' });
   }
 });
@@ -122,7 +112,6 @@ router.post('/approve/:id', [verifyToken, isAdmin], async (req, res) => {
     });
     if (existingUser) {
       await PendingUser.findByIdAndDelete(pendingUserId);
-      console.warn(`[PendingUsers APPROVE] User ${pendingUserDoc.email} already exists in Org ${pendingUserDoc.organizationId}. Pending entry ${pendingUserId} removed.`);
       return res.status(409).json({ success: false, error: 'User with this email or unique ID already exists in your organization. Pending entry removed.' });
     }
     
@@ -130,7 +119,7 @@ router.post('/approve/:id', [verifyToken, isAdmin], async (req, res) => {
     if (finalApprovedRole === 'admin') {
         const adminCountInOrg = await User.countDocuments({ role: 'admin', organizationId: pendingUserDoc.organizationId });
         if (adminCountInOrg > 0) {
-            console.warn(`[PendingUsers APPROVE] Attempt to approve pending user ${pendingUserDoc.email} as 'admin' in org ${pendingUserDoc.organizationId}, but an admin already exists. Role will be 'user'.`);
+            console.warn(`Attempt to approve pending user ${pendingUserDoc.email} as 'admin' in org ${pendingUserDoc.organizationId}, but an admin already exists. Role will be 'user'.`);
             finalApprovedRole = 'user';
         }
     }
@@ -150,19 +139,20 @@ router.post('/approve/:id', [verifyToken, isAdmin], async (req, res) => {
     });
     
     const createdUser = await newUser.save(); 
-    await PendingUser.findByIdAndDelete(pendingUserId);
-    console.log(`[PendingUsers APPROVE] Admin ${req.user.email} approved user ${createdUser.email} (ID: ${createdUser.id}) for Org: ${createdUser.organizationId}`);
 
-    // Send activation email to user
-    emailService.sendAccountActivatedByAdminEmail(createdUser.email, createdUser.displayName, req.user.displayName)
-        .catch(err => console.error("EmailJS Error (sendAccountActivatedByAdminEmail):", err));
+    await PendingUser.findByIdAndDelete(pendingUserId);
+
+    // TODO: Send email to user: sendAccountActivatedByAdminEmail(createdUser.email, createdUser.displayName, req.user.displayName);
+    // This would require the emailNotifications util or similar on backend. For now, frontend handles some of these.
 
     res.status(201).json({ success: true, message: 'User approved and account activated.', user: createdUser.toJSON() });
 
   } catch (err) {
-    console.error("[PendingUsers APPROVE] Error approving pending user:", err);
-    if (err.code === 11000 && err.keyPattern && err.keyPattern.password === 1) { // This condition for password duplicate is unlikely given User schema
-        return res.status(409).json({ success: false, error: 'User approval conflict, possibly already approved or concurrent request related to unique constraints (not password).' });
+    console.error("Error approving pending user:", err);
+    if (err.code === 11000 && err.keyPattern && err.keyPattern.password === 1) {
+        return res.status(409).json({ success: false, error: 'User approval conflict, possibly already approved or concurrent request.' });
+    } else if (err.code === 11000) { // Catch other unique constraint violations (email/uniqueId + orgId on User model)
+        return res.status(409).json({ success: false, error: 'A user with this email or unique ID already exists in your organization.' });
     }
     res.status(500).json({ success: false, error: 'Server error while approving user: ' + err.message });
   }
