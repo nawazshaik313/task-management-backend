@@ -17,14 +17,21 @@ router.post("/", [verifyToken, isAdmin], async (req, res) => {
     }
 
     let programName;
-    if (programId) {
-        const program = await Program.findOne({ _id: programId, organizationId });
+    const finalProgramId = programId || null; // Coerce empty string/falsy values to null
+
+    if (finalProgramId) {
+        const program = await Program.findOne({ _id: finalProgramId, organizationId });
         if (!program) return res.status(404).json({ success: false, message: "Program not found in your organization." });
         programName = program.name;
     }
 
     const newTask = new Task({ 
-        title, description, requiredSkills, programId, programName, deadline, 
+        title, 
+        description, 
+        requiredSkills, 
+        programId: finalProgramId, 
+        programName, 
+        deadline, 
         organizationId 
     });
     const savedTask = await newTask.save();

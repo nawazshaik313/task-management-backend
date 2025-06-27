@@ -67,7 +67,9 @@ app.use((err, req, res, next) => {
 
 // Start Server
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
+const HOST = '0.0.0.0'; // Listen on all available network interfaces
+
+app.listen(PORT, HOST, () => {
   console.log(`✅ Server is running on port ${PORT}`);
   if(process.env.NODE_ENV !== 'production'){
     console.log(`   Development server accessible at: http://localhost:${PORT}`);
