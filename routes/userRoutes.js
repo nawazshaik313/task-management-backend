@@ -344,4 +344,24 @@ router.post('/reset-password', async (req, res) => {
     }
 });
 
+// NEW PUBLIC ROUTE for Pre-registration page
+router.get('/public-info/:id', async (req, res) => {
+    try {
+        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+            return res.status(400).json({ success: false, message: 'Invalid referrer ID format.' });
+        }
+
+        const user = await User.findById(req.params.id).select('displayName role');
+
+        if (!user || user.role !== 'admin') {
+            return res.status(404).json({ success: false, message: 'Referrer not found.' });
+        }
+
+        res.json({ success: true, displayName: user.displayName });
+    } catch (error) {
+        console.error("Get public user info error:", error);
+        res.status(500).json({ success: false, message: 'Server error while fetching public info.' });
+    }
+});
+
 module.exports = router;
