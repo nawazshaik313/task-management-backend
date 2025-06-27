@@ -28,14 +28,13 @@ userSchema.pre('save', async function (next) {
     return next();
   }
 
-  // Prevent re-hashing an already hashed password (e.g., from pending user approval)
-  // Bcrypt hashes start with a recognizable pattern like $2a$, $2b$, or $2y$.
-  const isAlreadyHashed = this.password.startsWith('$2a$') || this.password.startsWith('$2b$') || this.password.startsWith('$2y$');
-  
-  if (isAlreadyHashed) {
-    return next();
+  // Prevent re-hashing an already hashed password (e.g., from pending user approval).
+  // Bcrypt hashes start with a recognizable pattern. This check prevents a fatal error during approval.
+  if (typeof this.password === 'string' && (this.password.startsWith('$2a$') || this.password.startsWith('$2b$') || this.password.startsWith('$2y$'))) {
+    return next(); // It's already a hash, so we skip hashing it again.
   }
 
+  // If we reach here, the password is a plain text string that needs hashing.
   try {
     const salt = await bcrypt.genSalt(10);
     this.password = await bcrypt.hash(this.password, salt);
