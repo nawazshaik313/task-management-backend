@@ -23,9 +23,19 @@ userSchema.index({ uniqueId: 1, organizationId: 1 }, { unique: true });
 
 // Pre-save hook to hash password
 userSchema.pre('save', async function (next) {
+  // Only hash the password if it has been modified (or is new)
   if (!this.isModified('password')) {
     return next();
   }
+
+  // Prevent re-hashing an already hashed password (e.g., from pending user approval)
+  // Bcrypt hashes start with a recognizable pattern like $2a$, $2b$, or $2y$.
+  const isAlreadyHashed = this.password.startsWith('$2a$') || this.password.startsWith('$2b$') || this.password.startsWith('$2y$');
+  
+  if (isAlreadyHashed) {
+    return next();
+  }
+
   try {
     const salt = await bcrypt.genSalt(10);
     this.password = await bcrypt.hash(this.password, salt);
