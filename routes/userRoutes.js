@@ -3,6 +3,7 @@ const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose'); // For ObjectId generation
 const User = require('../models/User');
+const PendingUser = require('../models/PendingUser');
 const jwt = require('jsonwebtoken');
 const { verifyToken, isAdmin } = require('../middleware/auth');
 
@@ -15,11 +16,6 @@ router.post('/register', async (req, res) => {
   }
 
   try {
-    let existingUser = await User.findOne({ $or: [{ email: email.toLowerCase() }, { uniqueId }] });
-    if (existingUser) {
-      return res.status(400).json({ success: false, message: 'User with this email or unique ID already exists.' });
-    }
-
     let finalRole = role || 'user';
     let organizationIdToSet;
 
@@ -27,16 +23,9 @@ router.post('/register', async (req, res) => {
       if (!organizationName) {
         return res.status(400).json({ success: false, message: 'Organization Name is required for admin registration.' });
       }
-      // For new admin, generate a new organization ID.
       organizationIdToSet = new mongoose.Types.ObjectId().toString();
-      // Potentially create an Organization record here if you have an Organization model.
-      // For now, the ID is just associated with the admin user.
     } else { // Role is 'user'
-      // For general user registration, organizationId must be provided or derived.
-      // Current frontend public registration for 'user' doesn't provide organizationId or referringAdminId.
-      // This path will likely fail unless frontend is changed or this type of registration is disallowed.
-      // Admins creating users or pre-registration are the primary paths for users to get an orgId.
-      if (req.body.organizationId) { // If admin is creating user and passing orgId directly
+      if (req.body.organizationId) {
           organizationIdToSet = req.body.organizationId;
       } else if (referringAdminId) {
           const refAdmin = await User.findById(referringAdminId);
@@ -45,10 +34,6 @@ router.post('/register', async (req, res) => {
           }
           organizationIdToSet = refAdmin.organizationId;
       } else {
-         // If a general user tries to register without an admin creating them or a referral,
-         // they cannot be assigned to an organization.
-         // This flow needs to be handled: either disallow, or create a pending user without org for later assignment.
-         // For now, making organizationId required on User model means this will fail if not set.
          return res.status(400).json({ success: false, message: 'User registration requires an organization context (e.g., created by an admin or via referral).' });
       }
     }
@@ -56,6 +41,17 @@ router.post('/register', async (req, res) => {
     if (!organizationIdToSet) {
         return res.status(400).json({ success: false, message: 'Organization ID could not be determined for the user.' });
     }
+    
+    const existingUser = await User.findOne({ $or: [{ email: email.toLowerCase() }, { uniqueId }], organizationId: organizationIdToSet });
+    if (existingUser) {
+      return res.status(409).json({ success: false, message: 'User with this email or unique ID already exists in this organization.' });
+    }
+
+    const existingPendingUser = await PendingUser.findOne({ $or: [{ email: email.toLowerCase() }, { uniqueId }], organizationId: organizationIdToSet });
+    if (existingPendingUser) {
+        return res.status(409).json({ success: false, message: 'User with this email or unique ID is already pending approval in this organization.' });
+    }
+
 
     const newUser = new User({
       email,
@@ -77,7 +73,7 @@ router.post('/register', async (req, res) => {
   } catch (error) {
     console.error("User registration error:", error);
     if (error.code === 11000) {
-        return res.status(400).json({ success: false, message: 'Email or Unique ID already exists.' });
+        return res.status(409).json({ success: false, message: 'Email or Unique ID already exists in this organization.' });
     }
     res.status(500).json({ success: false, message: 'Server error during registration.', error: error.message });
   }
