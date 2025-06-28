@@ -66,16 +66,13 @@ router.get("/", verifyToken, async (req, res) => {
 });
 
 // Update assignment status or details (Protected, scoped)
-router.patch("/", verifyToken, async (req, res) => {
+router.patch("/:id", verifyToken, async (req, res) => {
   try {
-    const { taskId, personId, status, userSubmissionDate, userDelayReason } = req.body;
+    const { status, userSubmissionDate, userDelayReason } = req.body;
     const organizationId = req.user.organizationId;
+    const assignmentId = req.params.id;
 
-    if (!taskId || !personId) {
-        return res.status(400).json({ success: false, message: "taskId and personId are required to identify the assignment." });
-    }
-    
-    const assignment = await Assignment.findOne({ taskId, personId, organizationId });
+    const assignment = await Assignment.findOne({ _id: assignmentId, organizationId });
     if (!assignment) {
       return res.status(404).json({ success: false, message: "Assignment not found in your organization." });
     }
@@ -104,8 +101,13 @@ router.patch("/", verifyToken, async (req, res) => {
     if (userSubmissionDate && assignment.personId.toString() === req.user.id) assignment.userSubmissionDate = userSubmissionDate;
     if (userDelayReason !== undefined && assignment.personId.toString() === req.user.id) assignment.userDelayReason = userDelayReason;
 
-    const updatedAssignment = await assignment.save();
-    res.json(updatedAssignment.toJSON());
+    const savedAssignment = await assignment.save();
+    const populatedAssignment = await savedAssignment.populate({
+        path: 'taskId', 
+        select: 'title description requiredSkills', 
+        match: { organizationId: req.user.organizationId }
+    });
+    res.json(populatedAssignment.toJSON());
   } catch (err) {
     console.error("Error updating assignment:", err);
     res.status(500).json({ success: false, message: "Server error while updating assignment.", error: err.message });
