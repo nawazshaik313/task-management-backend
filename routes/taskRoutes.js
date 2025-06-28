@@ -1,3 +1,4 @@
+
 const express = require("express");
 const router = express.Router();
 const Task = require("../models/Task");
@@ -16,21 +17,14 @@ router.post("/", [verifyToken, isAdmin], async (req, res) => {
     }
 
     let programName;
-    const finalProgramId = programId || null; // Coerce empty string/falsy values to null
-
-    if (finalProgramId) {
-        const program = await Program.findOne({ _id: finalProgramId, organizationId });
+    if (programId) {
+        const program = await Program.findOne({ _id: programId, organizationId });
         if (!program) return res.status(404).json({ success: false, message: "Program not found in your organization." });
         programName = program.name;
     }
 
     const newTask = new Task({ 
-        title, 
-        description, 
-        requiredSkills, 
-        programId: finalProgramId, 
-        programName, 
-        deadline, 
+        title, description, requiredSkills, programId, programName, deadline, 
         organizationId 
     });
     const savedTask = await newTask.save();
